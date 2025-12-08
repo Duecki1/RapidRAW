@@ -258,19 +258,39 @@ export default function Editor({
   }, [imageRenderSize.scale, onInitialFitScale]);
 
   const debouncedGenerateMaskOverlay = useCallback(
-    debounce(async (maskDef, renderSize) => {
+    debounce(async (maskDef, renderSize, isFullRes, origSize) => {
       if (!maskDef || !maskDef.visible || renderSize.width === 0) {
         setMaskOverlayUrl(null);
         return;
       }
       try {
+        // Always cap mask generation to preview resolution regardless of zoom level
+        // This prevents high-quality mask rendering when zoomed in
+        const maxPreviewDim = 2048; // Match backend thumbnail processing dimension
+        
+        let cappedScale = renderSize.scale;
+        let cappedWidth = Math.round(renderSize.width);
+        let cappedHeight = Math.round(renderSize.height);
+        
+        if (origSize && origSize.width > 0) {
+          // Calculate what scale would give us the preview resolution
+          const previewScaleFactor = Math.min(maxPreviewDim / origSize.width, maxPreviewDim / origSize.height, 1.0);
+          
+          // If current render size would exceed preview resolution, cap it
+          if (renderSize.scale > previewScaleFactor) {
+            cappedScale = previewScaleFactor;
+            cappedWidth = Math.round(origSize.width * previewScaleFactor);
+            cappedHeight = Math.round(origSize.height * previewScaleFactor);
+          }
+        }
+        
         const cropOffset = [adjustments.crop?.x || 0, adjustments.crop?.y || 0];
         const dataUrl: string = await invoke(Invokes.GenerateMaskOverlay, {
           cropOffset,
-          height: Math.round(renderSize.height),
+          height: cappedHeight,
           maskDef,
-          scale: renderSize.scale,
-          width: Math.round(renderSize.width),
+          scale: cappedScale,
+          width: cappedWidth,
         });
         if (dataUrl) {
           setMaskOverlayUrl(dataUrl);
@@ -301,7 +321,7 @@ export default function Editor({
       }
     }
 
-    debouncedGenerateMaskOverlay(maskDefForOverlay, imageRenderSize);
+    debouncedGenerateMaskOverlay(maskDefForOverlay, imageRenderSize, isFullResolution, originalSize);
 
     return () => debouncedGenerateMaskOverlay.cancel();
   }, [
@@ -311,6 +331,8 @@ export default function Editor({
     adjustments.masks,
     adjustments.aiPatches,
     imageRenderSize,
+    isFullResolution,
+    originalSize,
     debouncedGenerateMaskOverlay,
   ]);
 

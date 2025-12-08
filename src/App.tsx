@@ -1974,19 +1974,30 @@ function App() {
   );
 
   useEffect(() => {
+    // Skip full-resolution requests when actively painting masks
+    if (activeMaskId || activeAiSubMaskId) {
+      return;
+    }
+    
     if (isFullResolution && selectedImage?.path) {
       if (fullResCacheKeyRef.current !== visualAdjustmentsKey) {
         setIsLoadingFullRes(true);
         requestFullResolution(adjustments, visualAdjustmentsKey);
       }
     }
-  }, [adjustments, isFullResolution, selectedImage?.path, requestFullResolution, visualAdjustmentsKey]);
+  }, [adjustments, isFullResolution, selectedImage?.path, requestFullResolution, visualAdjustmentsKey, activeMaskId, activeAiSubMaskId]);
 
   const handleFullResolutionLogic = useCallback(
     (targetZoomPercent: number, currentDisplayWidth: number) => {
       if (!initialFitScale) {
         return;
       }
+      
+      // Skip full-resolution logic when actively painting masks
+      if (activeMaskId || activeAiSubMaskId) {
+        return;
+      }
+      
       const highResThreshold = Math.max(initialFitScale * 2, 0.5);
       const needsFullRes = targetZoomPercent > highResThreshold;
       const previewIsAlreadyFullRes = previewSize.width >= originalSize.width;
@@ -2027,6 +2038,8 @@ function App() {
       adjustments,
       fullResolutionUrl,
       visualAdjustmentsKey,
+      activeMaskId,
+      activeAiSubMaskId,
     ],
   );
 
