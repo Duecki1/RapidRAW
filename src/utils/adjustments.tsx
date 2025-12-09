@@ -78,6 +78,14 @@ export enum Effect {
   NegativeBlueBalance = 'negativeBlueBalance',
   NegativeGreenBalance = 'negativeGreenBalance',
   NegativeRedBalance = 'negativeRedBalance',
+  OuterGlowInnerColor = 'outerGlowInnerColor',
+  OuterGlowBlendMode = 'outerGlowBlendMode',
+  OuterGlowColor = 'outerGlowColor',
+  OuterGlowContour = 'outerGlowContour',
+  OuterGlowNoise = 'outerGlowNoise',
+  OuterGlowOpacity = 'outerGlowOpacity',
+  OuterGlowSize = 'outerGlowSize',
+  OuterGlowSpread = 'outerGlowSpread',
   VignetteAmount = 'vignetteAmount',
   VignetteFeather = 'vignetteFeather',
   VignetteMidpoint = 'vignetteMidpoint',
@@ -132,6 +140,14 @@ export interface Adjustments {
   negativeGreenBalance: number;
   negativeRedBalance: number;
   orientationSteps: number;
+  outerGlowInnerColor: string;
+  outerGlowBlendMode: 'normal' | 'screen' | 'add' | 'multiply';
+  outerGlowColor: string;
+  outerGlowContour: 'linear' | 'cone' | 'ring' | 'rounded';
+  outerGlowNoise: number;
+  outerGlowOpacity: number;
+  outerGlowSize: number;
+  outerGlowSpread: number;
   rating: number;
   rotation: number;
   saturation: number;
@@ -258,6 +274,7 @@ export interface SectionVisibility {
   color: boolean;
   details: boolean;
   effects: boolean;
+  specialEffects: boolean;
 }
 
 export const COLOR_LABELS: Array<Color> = [
@@ -332,6 +349,7 @@ export const INITIAL_MASK_ADJUSTMENTS: MaskAdjustments = {
     color: true,
     details: true,
     effects: true,
+    specialEffects: true,
   },
   shadows: 0,
   sharpness: 0,
@@ -414,6 +432,14 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   negativeGreenBalance: 0,
   negativeRedBalance: 0,
   orientationSteps: 0,
+  outerGlowBlendMode: 'screen',
+  outerGlowColor: '#ffffff',
+  outerGlowInnerColor: '#ffffff',
+  outerGlowContour: 'linear',
+  outerGlowNoise: 0,
+  outerGlowOpacity: 100,
+  outerGlowSize: 0,
+  outerGlowSpread: 0,
   rating: 0,
   rotation: 0,
   saturation: 0,
@@ -423,6 +449,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
     color: true,
     details: true,
     effects: true,
+    specialEffects: true,
   },
   shadows: 0,
   sharpness: 0,

@@ -57,6 +57,22 @@ struct GlobalAdjustments {
     grain_amount: f32,
     grain_size: f32,
     grain_roughness: f32,
+    
+    outer_glow_size: f32,
+    outer_glow_opacity: f32,
+    outer_glow_spread: f32,
+    outer_glow_noise: f32,
+    outer_glow_color_r: f32,
+    outer_glow_color_g: f32,
+    outer_glow_color_b: f32,
+    outer_glow_inner_color_r: f32,
+    outer_glow_inner_color_g: f32,
+    outer_glow_inner_color_b: f32,
+    outer_glow_blend_mode: u32,
+    outer_glow_contour: u32,
+    _pad_glow1: f32,
+    _pad_glow2: f32,
+    _pad_glow3: f32,
 
     chromatic_aberration_red_cyan: f32,
     chromatic_aberration_blue_yellow: f32,
@@ -84,6 +100,7 @@ struct GlobalAdjustments {
     _pad_agx1: f32,
     _pad_agx2: f32,
     _pad_agx3: f32,
+    _pad_agx4: f32,
     agx_pipe_to_rendering_matrix: mat3x3<f32>,
     agx_rendering_to_pipe_matrix: mat3x3<f32>,
 
@@ -114,6 +131,10 @@ struct GlobalAdjustments {
     _pad_end2: f32,
     _pad_end3: f32,
     _pad_end4: f32,
+    _pad_end5: f32,
+    _pad_end6: f32,
+    _pad_end7: f32,
+    _pad_end8: f32,
 }
 
 struct MaskAdjustments {
@@ -301,6 +322,131 @@ fn gradient_noise(p: vec2<f32>) -> f32 {
 fn dither(coords: vec2<u32>) -> f32 {
     let p = vec2<f32>(coords);
     return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
+}
+
+fn apply_contour(dist: f32, contour_type: u32) -> f32 {
+    switch (contour_type) {
+        case 0u: { return dist; }  // Linear
+        case 1u: { return 1.0 - abs(dist * 2.0 - 1.0); }  // Cone
+        case 2u: {   // Ring
+            let ring_dist = abs(dist - 0.5) * 2.0;
+            return 1.0 - ring_dist;
+        }
+        case 3u: { return sqrt(dist); }  // Rounded
+        default: { return dist; }
+    }
+}
+
+fn blend_screen(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    return 1.0 - (1.0 - base) * (1.0 - blend);
+}
+
+fn blend_add(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    return clamp(base + blend, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn blend_multiply(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    return base * blend;
+}
+
+fn apply_blend_mode(base: vec3<f32>, blend: vec3<f32>, opacity: f32, mode: u32) -> vec3<f32> {
+    var result: vec3<f32>;
+    switch (mode) {
+        case 0u: { result = mix(base, blend, opacity); }  // Normal
+        case 1u: { result = mix(base, blend_screen(base, blend), opacity); }  // Screen
+        case 2u: { result = mix(base, blend_add(base, blend), opacity); }  // Add
+        case 3u: { result = mix(base, blend_multiply(base, blend), opacity); }  // Multiply
+        default: { result = base; }
+    }
+    return result;
+}
+
+fn apply_outer_glow(
+    color: vec3<f32>,
+    coords: vec2<u32>,
+    glow_size: f32,
+    glow_opacity: f32,
+    glow_color: vec3<f32>,
+    glow_spread: f32,
+    glow_noise: f32,
+    blend_mode: u32,
+    contour_type: u32,
+    inner_color: vec3<f32>,
+    mask_texture: texture_2d<f32>
+) -> vec3<f32> {
+    let dims = vec2<f32>(textureDimensions(input_texture));
+    let coord_f = vec2<f32>(coords);
+    let mask_value = textureLoad(mask_texture, coords, 0).r;
+    var result = color;
+
+    let base_opacity = clamp(glow_opacity / 100.0, 0.0, 1.0);
+
+    // Fill painted area with inner color so the neon core stays bright
+    if (mask_value > 0.0 && base_opacity > 0.0) {
+        // Slightly favor full coverage when opacity is 100% to avoid transparency in the core.
+        let inner_strength = clamp(pow(mask_value, 0.5) * base_opacity, 0.0, 1.0);
+        result = mix(result, inner_color, inner_strength);
+    }
+
+    if (glow_size <= 0.0 || glow_opacity <= 0.0) {
+        return result;
+    }
+
+    // Calculate glow intensity by sampling nearby mask pixels
+    // Use a normalized Gaussian accumulation to avoid hard borders/rings.
+    let radius = clamp(i32(glow_size * 32.0), 1, 96);
+    let sigma = max(glow_size * 12.0, 1.0);
+    var weighted_sum = 0.0;
+    var weight_total = 0.0;
+    
+    for (var dy = -radius; dy <= radius; dy = dy + 1) {
+        for (var dx = -radius; dx <= radius; dx = dx + 1) {
+            let offset = vec2<i32>(dx, dy);
+            let sample_coord = clamp(
+                vec2<i32>(coords) + offset,
+                vec2<i32>(0),
+                vec2<i32>(dims) - vec2<i32>(1)
+            );
+            
+            let sample_mask = textureLoad(mask_texture, vec2<u32>(sample_coord), 0).r;
+            let dist = length(vec2<f32>(offset));
+            let falloff = exp(-(dist * dist) / (2.0 * sigma * sigma));
+            weighted_sum += sample_mask * falloff;
+            weight_total += falloff;
+        }
+    }
+    
+    var glow_intensity = 0.0;
+    if (weight_total > 0.0) {
+        glow_intensity = weighted_sum / weight_total;
+    }
+
+    // Suppress glow contribution where the mask is fully opaque to remove the hard cut line.
+    let inside_fade = 1.0 - smoothstep(0.6, 1.0, mask_value);
+    glow_intensity *= inside_fade;
+    
+    // Spread controls softness: lower spread -> softer rolloff, higher spread -> tighter edge
+    let spread_mix = clamp(glow_spread / 100.0, 0.0, 1.0);
+    glow_intensity = pow(glow_intensity, mix(2.2, 0.6, spread_mix));
+    
+    // Apply contour shaping
+    glow_intensity = apply_contour(glow_intensity, contour_type);
+    
+    // Add noise for texture/particle effect
+    if (glow_noise > 0.0) {
+        let noise_coord = coord_f * 0.01;
+        let noise = gradient_noise(noise_coord);
+        glow_intensity *= mix(1.0, noise, glow_noise / 100.0);
+    }
+    
+    // Apply opacity
+    glow_intensity = clamp(glow_intensity * base_opacity, 0.0, 1.0);
+    
+    // Apply glow color with blend mode
+    let glow_contribution = glow_color * glow_intensity;
+    result = apply_blend_mode(result, glow_contribution, glow_intensity, blend_mode);
+    
+    return result;
 }
 
 fn interpolate_cubic_hermite(x: f32, p1: Point, p2: Point, m1: f32, m2: f32) -> f32 {
@@ -1124,6 +1270,26 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let g = adjustments.global;
+    
+    // Apply outer glow effect
+    if (g.outer_glow_opacity > 0.0) {
+        let glow_color = vec3<f32>(g.outer_glow_color_r, g.outer_glow_color_g, g.outer_glow_color_b);
+        let inner_color = vec3<f32>(g.outer_glow_inner_color_r, g.outer_glow_inner_color_g, g.outer_glow_inner_color_b);
+        final_rgb = apply_outer_glow(
+            final_rgb,
+            absolute_coord,
+            g.outer_glow_size,
+            g.outer_glow_opacity,
+            glow_color,
+            g.outer_glow_spread,
+            g.outer_glow_noise,
+            g.outer_glow_blend_mode,
+            g.outer_glow_contour,
+            inner_color,
+            mask0  // Use first mask or composite mask
+        );
+    }
+    
     if (g.vignette_amount != 0.0) {
         let full_dims_f = vec2<f32>(textureDimensions(input_texture));
         let coord_f = vec2<f32>(absolute_coord);

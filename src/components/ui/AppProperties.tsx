@@ -84,6 +84,7 @@ export enum Panel {
   Masks = 'masks',
   Metadata = 'metadata',
   Presets = 'presets',
+  SpecialEffects = 'special-effects',
 }
 
 export enum RawStatus {

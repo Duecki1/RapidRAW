@@ -457,8 +457,10 @@ export default function Editor({
     );
   }
 
+  const isSpecialEffects = activeRightPanel === Panel.SpecialEffects;
+  
   const activeSubMask = useMemo(() => {
-    if (isMasking && activeMaskId) {
+    if ((isMasking || isSpecialEffects) && activeMaskId) {
       const container = adjustments.masks.find((c: MaskContainer) =>
         c.subMasks.some((sm: SubMask) => sm.id === activeMaskId),
       );
@@ -471,7 +473,7 @@ export default function Editor({
       return container?.subMasks?.find((sm: SubMask) => sm.id === activeAiSubMaskId);
     }
     return null;
-  }, [adjustments.masks, adjustments.aiPatches, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing]);
+  }, [adjustments.masks, adjustments.aiPatches, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing, isSpecialEffects, activeRightPanel]);
 
   const isPanningDisabled =
     isMaskHovered ||
@@ -480,7 +482,8 @@ export default function Editor({
     (isAiEditing &&
       (activeSubMask?.type === Mask.Brush ||
         activeSubMask?.type === Mask.AiSubject ||
-        activeSubMask?.type === Mask.QuickEraser));
+        activeSubMask?.type === Mask.QuickEraser)) ||
+    (isSpecialEffects && activeSubMask?.type === Mask.Brush);
 
   const waveFormData: WaveformData = waveform || { blue: [], green: [], height: 0, luma: [], red: [], width: 0 };
 
@@ -557,6 +560,7 @@ export default function Editor({
                 activeAiSubMaskId={activeAiSubMaskId}
                 activeMaskContainerId={activeMaskContainerId}
                 activeMaskId={activeMaskId}
+                activeRightPanel={activeRightPanel}
                 adjustments={adjustments}
                 brushSettings={brushSettings}
                 crop={crop}

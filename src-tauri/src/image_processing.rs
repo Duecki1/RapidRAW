@@ -212,7 +212,7 @@ pub struct AutoAdjustmentResults {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct Point {
     x: f32,
     y: f32,
@@ -221,7 +221,7 @@ pub struct Point {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct HslColor {
     hue: f32,
     saturation: f32,
@@ -230,7 +230,7 @@ pub struct HslColor {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct ColorGradeSettings {
     pub hue: f32,
     pub saturation: f32,
@@ -239,7 +239,7 @@ pub struct ColorGradeSettings {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct ColorCalibrationSettings {
     pub shadows_tint: f32,
     pub red_hue: f32,
@@ -252,7 +252,7 @@ pub struct ColorCalibrationSettings {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct GpuMat3 {
     col0: [f32; 4],
     col1: [f32; 4],
@@ -270,7 +270,7 @@ impl Default for GpuMat3 {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct GlobalAdjustments {
     pub exposure: f32,
     pub brightness: f32,
@@ -298,6 +298,22 @@ pub struct GlobalAdjustments {
     pub grain_amount: f32,
     pub grain_size: f32,
     pub grain_roughness: f32,
+    
+    pub outer_glow_size: f32,
+    pub outer_glow_opacity: f32,
+    pub outer_glow_spread: f32,
+    pub outer_glow_noise: f32,
+    pub outer_glow_color_r: f32,
+    pub outer_glow_color_g: f32,
+    pub outer_glow_color_b: f32,
+    pub outer_glow_inner_color_r: f32,
+    pub outer_glow_inner_color_g: f32,
+    pub outer_glow_inner_color_b: f32,
+    pub outer_glow_blend_mode: u32,
+    pub outer_glow_contour: u32,
+    _pad_glow1: f32,
+    _pad_glow2: f32,
+    _pad_glow3: f32,
 
     pub chromatic_aberration_red_cyan: f32,
     pub chromatic_aberration_blue_yellow: f32,
@@ -325,6 +341,7 @@ pub struct GlobalAdjustments {
     _pad_agx1: f32,
     _pad_agx2: f32,
     _pad_agx3: f32,
+    _pad_agx4: f32,
     pub agx_pipe_to_rendering_matrix: GpuMat3,
     pub agx_rendering_to_pipe_matrix: GpuMat3,
 
@@ -355,10 +372,14 @@ pub struct GlobalAdjustments {
     _pad_end2: f32,
     _pad_end3: f32,
     _pad_end4: f32,
+    _pad_end5: f32,
+    _pad_end6: f32,
+    _pad_end7: f32,
+    _pad_end8: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct MaskAdjustments {
     pub exposure: f32,
     pub brightness: f32,
@@ -411,7 +432,7 @@ pub struct MaskAdjustments {
 }
 
 #[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct AllAdjustments {
     pub global: GlobalAdjustments,
     pub mask_adjustments: [MaskAdjustments; 11],
@@ -815,6 +836,112 @@ fn get_global_adjustments_from_json(
             SCALES.grain_roughness,
             Some(50.0),
         ),
+        
+        outer_glow_size: if is_visible("specialEffects") {
+            js_adjustments["outerGlowSize"].as_f64().unwrap_or(0.0) as f32 / 100.0
+        } else {
+            0.0
+        },
+        outer_glow_opacity: if is_visible("specialEffects") {
+            js_adjustments["outerGlowOpacity"].as_f64().unwrap_or(100.0) as f32
+        } else {
+            100.0
+        },
+        outer_glow_spread: if is_visible("specialEffects") {
+            js_adjustments["outerGlowSpread"].as_f64().unwrap_or(0.0) as f32
+        } else {
+            0.0
+        },
+        outer_glow_noise: if is_visible("specialEffects") {
+            js_adjustments["outerGlowNoise"].as_f64().unwrap_or(0.0) as f32
+        } else {
+            0.0
+        },
+        outer_glow_color_r: if is_visible("specialEffects") {
+            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ffffff");
+            if hex.starts_with('#') && hex.len() == 7 {
+                u8::from_str_radix(&hex[1..3], 16).unwrap_or(255) as f32 / 255.0
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        },
+        outer_glow_color_g: if is_visible("specialEffects") {
+            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ffffff");
+            if hex.starts_with('#') && hex.len() == 7 {
+                u8::from_str_radix(&hex[3..5], 16).unwrap_or(255) as f32 / 255.0
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        },
+        outer_glow_color_b: if is_visible("specialEffects") {
+            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ffffff");
+            if hex.starts_with('#') && hex.len() == 7 {
+                u8::from_str_radix(&hex[5..7], 16).unwrap_or(255) as f32 / 255.0
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        },
+        outer_glow_inner_color_r: if is_visible("specialEffects") {
+            let hex = js_adjustments["outerGlowInnerColor"].as_str().unwrap_or("#ffffff");
+            if hex.starts_with('#') && hex.len() == 7 {
+                u8::from_str_radix(&hex[1..3], 16).unwrap_or(255) as f32 / 255.0
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        },
+        outer_glow_inner_color_g: if is_visible("specialEffects") {
+            let hex = js_adjustments["outerGlowInnerColor"].as_str().unwrap_or("#ffffff");
+            if hex.starts_with('#') && hex.len() == 7 {
+                u8::from_str_radix(&hex[3..5], 16).unwrap_or(255) as f32 / 255.0
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        },
+        outer_glow_inner_color_b: if is_visible("specialEffects") {
+            let hex = js_adjustments["outerGlowInnerColor"].as_str().unwrap_or("#ffffff");
+            if hex.starts_with('#') && hex.len() == 7 {
+                u8::from_str_radix(&hex[5..7], 16).unwrap_or(255) as f32 / 255.0
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        },
+        outer_glow_blend_mode: if is_visible("specialEffects") {
+            match js_adjustments["outerGlowBlendMode"].as_str().unwrap_or("screen") {
+                "normal" => 0,
+                "screen" => 1,
+                "add" => 2,
+                "multiply" => 3,
+                _ => 1,
+            }
+        } else {
+            1
+        },
+        outer_glow_contour: if is_visible("specialEffects") {
+            match js_adjustments["outerGlowContour"].as_str().unwrap_or("linear") {
+                "linear" => 0,
+                "cone" => 1,
+                "ring" => 2,
+                "rounded" => 3,
+                _ => 0,
+            }
+        } else {
+            0
+        },
+        _pad_glow1: 0.0,
+        _pad_glow2: 0.0,
+        _pad_glow3: 0.0,
 
         chromatic_aberration_red_cyan: get_val(
             "details",
@@ -867,6 +994,7 @@ fn get_global_adjustments_from_json(
         _pad_agx1: 0.0,
         _pad_agx2: 0.0,
         _pad_agx3: 0.0,
+        _pad_agx4: 0.0,
         agx_pipe_to_rendering_matrix: pipe_to_rendering,
         agx_rendering_to_pipe_matrix: rendering_to_pipe,
 
@@ -921,6 +1049,10 @@ fn get_global_adjustments_from_json(
         _pad_end2: 0.0,
         _pad_end3: 0.0,
         _pad_end4: 0.0,
+        _pad_end5: 0.0,
+        _pad_end6: 0.0,
+        _pad_end7: 0.0,
+        _pad_end8: 0.0,
     }
 }
 

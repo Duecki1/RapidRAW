@@ -10,11 +10,13 @@ import { ClerkProvider } from '@clerk/clerk-react';
 import clsx from 'clsx';
 import {
   Aperture,
+  Brush,
   Check,
   ClipboardPaste,
   Copy,
   CopyPlus,
   Edit,
+  Eraser,
   FileEdit,
   Folder,
   FolderInput,
@@ -64,6 +66,9 @@ import CopyPasteSettingsModal from './components/modals/CopyPasteSettingsModal';
 import CullingModal from './components/modals/CullingModal';
 import { useHistoryState } from './hooks/useHistoryState';
 import Resizer from './components/ui/Resizer';
+import CollapsibleSection from './components/ui/CollapsibleSection';
+import Slider from './components/ui/Slider';
+import Dropdown from './components/ui/Dropdown';
 import {
   Adjustments,
   AiPatch,
@@ -72,6 +77,7 @@ import {
   Coord,
   COPYABLE_ADJUSTMENT_KEYS,
   INITIAL_ADJUSTMENTS,
+  INITIAL_MASK_CONTAINER,
   MaskContainer,
   normalizeLoadedAdjustments,
   PasteMode,
@@ -80,7 +86,8 @@ import {
 import { generatePaletteFromImage } from './utils/palette';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { THEMES, DEFAULT_THEME_ID, ThemeProps } from './utils/themes';
-import { SubMask, ToolType } from './components/panel/right/Masks';
+import { Mask, SubMask, ToolType } from './components/panel/right/Masks';
+import { createSubMask } from './utils/maskUtils';
 import {
   EXPORT_TIMEOUT,
   ExportState,
@@ -311,6 +318,8 @@ function App() {
     details: false,
     effects: false,
   });
+  const [outerGlowOpen, setOuterGlowOpen] = useState(true);
+  const [neonMaskOpen, setNeonMaskOpen] = useState(true);
   const [isLibraryExportPanelVisible, setIsLibraryExportPanelVisible] = useState(false);
   const [libraryViewMode, setLibraryViewMode] = useState<LibraryViewMode>(LibraryViewMode.Flat);
   const [leftPanelWidth, setLeftPanelWidth] = useState<number>(256);
@@ -464,6 +473,97 @@ function App() {
       setIsMaskControlHovered(false);
     }
   }, [activeRightPanel, activeMaskContainerId, activeAiPatchContainerId]);
+
+  // Auto-create and select Neon Mask when entering Special Effects panel
+  useEffect(() => {
+    if (activeRightPanel === Panel.SpecialEffects && selectedImage && originalSize.width > 0) {
+      console.log('[NEON DEBUG] Special Effects opened');
+      console.log('[NEON DEBUG] Current masks:', adjustments.masks.map((m: any) => ({ name: m.name, visible: m.visible, subMasks: m.subMasks.length })));
+      console.log('[NEON DEBUG] Current outerGlowSize:', adjustments.outerGlowSize);
+      
+      const hasNeonMask = adjustments.masks.some((mask: any) => mask.name === 'Neon Mask');
+      
+      if (!hasNeonMask) {
+        console.log('[NEON DEBUG] Creating new Neon Mask...');
+        const neonBrushMask = createSubMask(Mask.Brush, originalSize);
+        const neonContainer = {
+          ...INITIAL_MASK_CONTAINER,
+          id: crypto.randomUUID(),
+          name: 'Neon Mask',
+          subMasks: [neonBrushMask],
+          visible: true,
+        };
+        
+        console.log('[NEON DEBUG] Neon container created:', neonContainer);
+        
+        setAdjustments((prev: Adjustments) => {
+          const newAdj = {
+            ...prev,
+            masks: [neonContainer, ...prev.masks],
+            // Set default glow settings - note: divided by 100 in shader, then multiplied by 50 for radius
+            outerGlowSize: prev.outerGlowSize === 0 ? 60 : prev.outerGlowSize,
+            outerGlowOpacity: prev.outerGlowOpacity ?? 100,
+            outerGlowColor: prev.outerGlowColor || '#00ffff',
+            outerGlowInnerColor: prev.outerGlowInnerColor || '#ffffff',
+            outerGlowSpread: prev.outerGlowSpread ?? 20,
+            // Ensure specialEffects section is visible
+            sectionVisibility: {
+              ...prev.sectionVisibility,
+              specialEffects: true,
+            },
+          };
+          console.log('[NEON DEBUG] Set adjustments:', { 
+            maskCount: newAdj.masks.length, 
+            outerGlowSize: newAdj.outerGlowSize,
+            outerGlowOpacity: newAdj.outerGlowOpacity,
+            outerGlowColor: newAdj.outerGlowColor,
+            outerGlowSpread: newAdj.outerGlowSpread,
+            outerGlowInnerColor: newAdj.outerGlowInnerColor,
+            specialEffectsVisible: newAdj.sectionVisibility?.specialEffects,
+            neonMaskVisible: neonContainer.visible,
+            neonMaskName: neonContainer.name,
+          });
+          return newAdj;
+        });
+        
+        setActiveMaskContainerId(neonContainer.id);
+        setActiveMaskId(neonBrushMask.id);
+        console.log('[NEON DEBUG] Neon Mask activated:', neonContainer.id, neonBrushMask.id);
+      } else {
+        console.log('[NEON DEBUG] Found existing Neon Mask');
+        const neonMask = adjustments.masks.find((mask: any) => mask.name === 'Neon Mask');
+        if (neonMask && neonMask.subMasks.length > 0) {
+          console.log('[NEON DEBUG] Neon Mask has', neonMask.subMasks[0].parameters?.lines?.length || 0, 'brush strokes');
+          setActiveMaskContainerId(neonMask.id);
+          setActiveMaskId(neonMask.subMasks[0].id);
+        }
+        // Set default glow settings if not already set
+        if (adjustments.outerGlowSize === 0) {
+          console.log('[NEON DEBUG] Setting default glow size to 60');
+          setAdjustments((prev: Adjustments) => ({
+            ...prev,
+            outerGlowSize: 60,
+            outerGlowColor: prev.outerGlowColor || '#00ffff',
+            outerGlowInnerColor: prev.outerGlowInnerColor || '#ffffff',
+            outerGlowSpread: prev.outerGlowSpread === 0 ? 20 : prev.outerGlowSpread,
+            // Ensure specialEffects section is visible
+            sectionVisibility: {
+              ...prev.sectionVisibility,
+              specialEffects: true,
+            },
+          }));
+        }
+      }
+      
+      // Set brush as default tool
+      setBrushSettings({
+        size: 50,
+        feather: 50,
+        tool: ToolType.Brush,
+      });
+      console.log('[NEON DEBUG] Brush settings set to:', { size: 50, feather: 50, tool: ToolType.Brush });
+    }
+  }, [activeRightPanel, selectedImage, originalSize.width]);
 
   const geometricAdjustmentsKey = useMemo(() => {
     if (!adjustments) return '';
@@ -1037,7 +1137,7 @@ function App() {
         setError(`Processing failed: ${err}`);
         setIsAdjusting(false);
       });
-    }, 50),
+    }, 150),
     [selectedImage?.isReady],
   );
 
@@ -1046,6 +1146,17 @@ function App() {
       if (!selectedImage?.isReady) {
         return;
       }
+      
+      console.log('[PREVIEW DEBUG] Generating preview with:', {
+        outerGlowSize: currentAdjustments.outerGlowSize,
+        outerGlowColor: currentAdjustments.outerGlowColor,
+        specialEffectsVisible: currentAdjustments.sectionVisibility?.specialEffects,
+        maskCount: currentAdjustments.masks.length,
+        firstMaskName: currentAdjustments.masks[0]?.name,
+        firstMaskVisible: currentAdjustments.masks[0]?.visible,
+        firstMaskLines: currentAdjustments.masks[0]?.subMasks?.[0]?.parameters?.lines?.length || 0,
+      });
+      
       invoke(Invokes.GenerateUncroppedPreview, { jsAdjustments: currentAdjustments }).catch((err) =>
         console.error('Failed to generate uncropped preview:', err),
       );
@@ -3714,6 +3825,270 @@ function App() {
                           selectedImage={selectedImage}
                           setExportState={setExportState}
                         />
+                      )}
+                      {renderedRightPanel === Panel.SpecialEffects && (
+                        <div className="flex flex-col h-full">
+                          <div className="p-4 flex justify-between items-center flex-shrink-0 border-b border-surface">
+                            <h2 className="text-xl font-bold text-primary text-shadow-shiny">Special Effects</h2>
+                            <button
+                              className="p-2 rounded-full hover:bg-surface transition-colors"
+                              onClick={() => {
+                                setAdjustments((prev: Partial<Adjustments>) => ({
+                                  ...prev,
+                                  outerGlowSize: 0,
+                                  outerGlowOpacity: 100,
+                                  outerGlowColor: '#ffffff',
+                                  outerGlowSpread: 0,
+                                  outerGlowNoise: 0,
+                                  outerGlowBlendMode: 'screen',
+                                  outerGlowContour: 'linear',
+                                }));
+                              }}
+                              title="Reset All"
+                            >
+                              <RotateCcw size={18} />
+                            </button>
+                          </div>
+                          <div className="flex-grow overflow-y-auto p-4 text-text-secondary space-y-6">
+                            <div className="flex-shrink-0 group">
+                              <CollapsibleSection 
+                                isOpen={outerGlowOpen} 
+                                onToggle={() => setOuterGlowOpen(!outerGlowOpen)} 
+                                isContentVisible={(adjustments.sectionVisibility || INITIAL_ADJUSTMENTS.sectionVisibility).specialEffects !== false}
+                                onToggleVisibility={() => {
+                                  setAdjustments((prev: Adjustments) => {
+                                    const currentVisibility = prev.sectionVisibility || INITIAL_ADJUSTMENTS.sectionVisibility;
+                                    return {
+                                      ...prev,
+                                      sectionVisibility: {
+                                        ...currentVisibility,
+                                        specialEffects: !currentVisibility.specialEffects,
+                                      },
+                                    };
+                                  });
+                                }}
+                                title="Outer Glow"
+                              >
+                                <div className="space-y-4">
+                                  <Slider
+                                    label="Size"
+                                    max={100}
+                                    min={0}
+                                    onChange={(e: any) => {
+                                      const newSize = parseInt(e.target.value, 10);
+                                      console.log('[GLOW DEBUG] Size changed to:', newSize, '(shader will use:', newSize / 100, ')');
+                                      setAdjustments((prev: Partial<Adjustments>) => ({
+                                        ...prev,
+                                        outerGlowSize: newSize,
+                                      }));
+                                    }}
+                                    step={1}
+                                    value={adjustments.outerGlowSize || 0}
+                                  />
+                                  <Slider
+                                    label="Opacity"
+                                    max={100}
+                                    min={0}
+                                    onChange={(e: any) =>
+                                      setAdjustments((prev: Partial<Adjustments>) => ({
+                                        ...prev,
+                                        outerGlowOpacity: parseInt(e.target.value, 10),
+                                      }))
+                                    }
+                                    step={1}
+                                    value={adjustments.outerGlowOpacity || 100}
+                                  />
+                                  <Slider
+                                    label="Spread"
+                                    max={100}
+                                    min={0}
+                                    onChange={(e: any) =>
+                                      setAdjustments((prev: Partial<Adjustments>) => ({
+                                        ...prev,
+                                        outerGlowSpread: parseInt(e.target.value, 10),
+                                      }))
+                                    }
+                                    step={1}
+                                    value={adjustments.outerGlowSpread || 0}
+                                  />
+                                  <Slider
+                                    label="Noise"
+                                    max={100}
+                                    min={0}
+                                    onChange={(e: any) =>
+                                      setAdjustments((prev: Partial<Adjustments>) => ({
+                                        ...prev,
+                                        outerGlowNoise: parseInt(e.target.value, 10),
+                                      }))
+                                    }
+                                    step={1}
+                                    value={adjustments.outerGlowNoise || 0}
+                                  />
+                                  <div className="flex items-center justify-between">
+                                    <label className="text-sm font-medium text-text-primary">Glow Color</label>
+                                    <input
+                                      className="p-0 h-8 w-12 border-none rounded-md cursor-pointer bg-transparent"
+                                      onChange={(e) =>
+                                        setAdjustments((prev: Partial<Adjustments>) => ({
+                                          ...prev,
+                                          outerGlowColor: e.target.value,
+                                        }))
+                                      }
+                                      type="color"
+                                      value={adjustments.outerGlowColor || '#ffffff'}
+                                    />
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <label className="text-sm font-medium text-text-primary">Inner Color</label>
+                                    <input
+                                      className="p-0 h-8 w-12 border-none rounded-md cursor-pointer bg-transparent"
+                                      onChange={(e) =>
+                                        setAdjustments((prev: Partial<Adjustments>) => ({
+                                          ...prev,
+                                          outerGlowInnerColor: e.target.value,
+                                        }))
+                                      }
+                                      type="color"
+                                      value={adjustments.outerGlowInnerColor || '#ffffff'}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-sm font-medium text-text-primary block mb-2">
+                                      Blend Mode
+                                    </label>
+                                    <Dropdown
+                                      onChange={(value: string) =>
+                                        setAdjustments((prev: Partial<Adjustments>) => ({
+                                          ...prev,
+                                          outerGlowBlendMode: value,
+                                        }))
+                                      }
+                                      options={[
+                                        { label: 'Normal', value: 'normal' },
+                                        { label: 'Screen', value: 'screen' },
+                                        { label: 'Add (Linear Dodge)', value: 'add' },
+                                        { label: 'Multiply', value: 'multiply' },
+                                      ]}
+                                      value={adjustments.outerGlowBlendMode || 'screen'}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-sm font-medium text-text-primary block mb-2">Contour</label>
+                                    <Dropdown
+                                      onChange={(value: string) =>
+                                        setAdjustments((prev: Partial<Adjustments>) => ({
+                                          ...prev,
+                                          outerGlowContour: value,
+                                        }))
+                                      }
+                                      options={[
+                                        { label: 'Linear', value: 'linear' },
+                                        { label: 'Cone', value: 'cone' },
+                                        { label: 'Ring', value: 'ring' },
+                                        { label: 'Rounded', value: 'rounded' },
+                                      ]}
+                                      value={adjustments.outerGlowContour || 'linear'}
+                                    />
+                                  </div>
+                                </div>
+                              </CollapsibleSection>
+                            </div>
+                            <div className="flex-shrink-0 group">
+                              <CollapsibleSection 
+                                isOpen={neonMaskOpen} 
+                                onToggle={() => setNeonMaskOpen(!neonMaskOpen)} 
+                                isContentVisible={(adjustments.sectionVisibility || INITIAL_ADJUSTMENTS.sectionVisibility).specialEffects !== false}
+                                onToggleVisibility={() => {
+                                  setAdjustments((prev: Adjustments) => {
+                                    const currentVisibility = prev.sectionVisibility || INITIAL_ADJUSTMENTS.sectionVisibility;
+                                    return {
+                                      ...prev,
+                                      sectionVisibility: {
+                                        ...currentVisibility,
+                                        specialEffects: !currentVisibility.specialEffects,
+                                      },
+                                    };
+                                  });
+                                }}
+                                title="Neon Mask"
+                              >
+                                <div className="space-y-4 pt-4">
+                                  <p className="text-sm text-text-secondary">
+                                    Paint where you want the glow effect to appear. Use brush to add glow areas and eraser to remove them.
+                                  </p>
+                                  {brushSettings && (
+                                    <div className="space-y-4 pt-4 border-t border-surface mt-4">
+                                      <Slider
+                                        defaultValue={100}
+                                        label="Brush Size"
+                                        max={200}
+                                        min={1}
+                                        onChange={(e: any) =>
+                                          setBrushSettings((prev: any) => ({
+                                            ...prev,
+                                            size: Number(e.target.value),
+                                          }))
+                                        }
+                                        step={1}
+                                        value={brushSettings.size}
+                                      />
+                                      <Slider
+                                        defaultValue={50}
+                                        label="Brush Feather"
+                                        max={100}
+                                        min={0}
+                                        onChange={(e: any) =>
+                                          setBrushSettings((prev: any) => ({
+                                            ...prev,
+                                            feather: Number(e.target.value),
+                                          }))
+                                        }
+                                        step={1}
+                                        value={brushSettings.feather}
+                                      />
+                                      <div className="grid grid-cols-2 gap-2 pt-2">
+                                        <button
+                                          className={`p-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
+                                            brushSettings.tool === 'brush'
+                                              ? 'bg-primary text-white border-2 border-primary'
+                                              : 'bg-surface text-text-secondary hover:bg-card-active border-2 border-surface'
+                                          }`}
+                                          onClick={() => {
+                                            console.log('[BRUSH DEBUG] Brush selected');
+                                            setBrushSettings((prev: any) => ({
+                                              ...prev,
+                                              tool: ToolType.Brush,
+                                            }));
+                                          }}
+                                        >
+                                          <Brush size={16} />
+                                          Brush
+                                        </button>
+                                        <button
+                                          className={`p-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
+                                            brushSettings.tool === 'eraser'
+                                              ? 'bg-primary text-white border-2 border-primary'
+                                              : 'bg-surface text-text-secondary hover:bg-card-active border-2 border-surface'
+                                          }`}
+                                          onClick={() => {
+                                            console.log('[BRUSH DEBUG] Eraser selected');
+                                            setBrushSettings((prev: any) => ({
+                                              ...prev,
+                                              tool: ToolType.Eraser,
+                                            }));
+                                          }}
+                                        >
+                                          <Eraser size={16} />
+                                          Eraser
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </CollapsibleSection>
+                            </div>
+                          </div>
+                        </div>
                       )}
                       {renderedRightPanel === Panel.Ai && (
                         <AIPanel

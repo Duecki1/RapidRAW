@@ -6,7 +6,7 @@ import { PercentCrop, Crop } from 'react-image-crop';
 import clsx from 'clsx';
 import { Adjustments, AiPatch, Coord, MaskContainer } from '../../../utils/adjustments';
 import { Mask, SubMask, SubMaskMode, ToolType } from '../right/Masks';
-import { BrushSettings, SelectedImage } from '../../ui/AppProperties';
+import { BrushSettings, SelectedImage, Panel } from '../../ui/AppProperties';
 import { RenderSize } from '../../../hooks/useImageRenderSize';
 
 interface CursorPreview {
@@ -27,6 +27,7 @@ interface ImageCanvasProps {
   activeAiSubMaskId: string | null;
   activeMaskContainerId: string | null;
   activeMaskId: string | null;
+  activeRightPanel: Panel | null;
   adjustments: Adjustments;
   brushSettings: BrushSettings | null;
   crop: Crop | null;
@@ -467,6 +468,7 @@ const ImageCanvas = memo(
     activeAiSubMaskId,
     activeMaskContainerId,
     activeMaskId,
+    activeRightPanel,
     adjustments,
     brushSettings,
     crop,
@@ -512,8 +514,10 @@ const ImageCanvas = memo(
     const [straightenLine, setStraightenLine] = useState<any>(null);
     const isStraightening = useRef(false);
 
+    const isSpecialEffects = activeRightPanel === Panel.SpecialEffects;
+
     const activeContainer = useMemo(() => {
-      if (isMasking) {
+      if (isMasking || isSpecialEffects) {
         return adjustments.masks.find((c: MaskContainer) => c.id === activeMaskContainerId);
       }
       if (isAiEditing) {
@@ -527,22 +531,34 @@ const ImageCanvas = memo(
       activeAiPatchContainerId,
       isMasking,
       isAiEditing,
+      isSpecialEffects,
+      activeRightPanel,
     ]);
 
     const activeSubMask = useMemo(() => {
       if (!activeContainer) {
         return null;
       }
-      if (isMasking) {
+      if (isMasking || isSpecialEffects) {
         return activeContainer.subMasks.find((m: SubMask) => m.id === activeMaskId);
       }
       if (isAiEditing) {
         return activeContainer.subMasks.find((m: SubMask) => m.id === activeAiSubMaskId);
       }
       return null;
-    }, [activeContainer, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing]);
+    }, [activeContainer, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing, isSpecialEffects]);
 
-    const isBrushActive = (isMasking || isAiEditing) && activeSubMask?.type === Mask.Brush;
+    const activePaintMaskId = useMemo(() => {
+      if (isMasking || isSpecialEffects) {
+        return activeMaskId;
+      }
+      if (isAiEditing) {
+        return activeAiSubMaskId;
+      }
+      return null;
+    }, [isMasking, isSpecialEffects, isAiEditing, activeMaskId, activeAiSubMaskId]);
+
+    const isBrushActive = ((isMasking || isAiEditing || isSpecialEffects) && activeSubMask?.type === Mask.Brush);
     const isAiSubjectActive =
       (isMasking || isAiEditing) &&
       (activeSubMask?.type === Mask.AiSubject || activeSubMask?.type === Mask.QuickEraser);
@@ -552,11 +568,11 @@ const ImageCanvas = memo(
       if (!activeContainer) {
         return [];
       }
-      const activeId = isMasking ? activeMaskId : activeAiSubMaskId;
+      const activeId = activePaintMaskId;
       const selectedMask = activeContainer.subMasks.find((m: SubMask) => m.id === activeId);
       const otherMasks = activeContainer.subMasks.filter((m: SubMask) => m.id !== activeId);
       return selectedMask ? [...otherMasks, selectedMask] : activeContainer.subMasks;
-    }, [activeContainer, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing]);
+    }, [activeContainer, activePaintMaskId]);
 
     useEffect(() => {
       const { path: currentImagePath, originalUrl, thumbnailUrl } = selectedImage;
@@ -827,7 +843,12 @@ const ImageCanvas = memo(
       const cropX = adjustments.crop?.x || 0;
       const cropY = adjustments.crop?.y || 0;
 
-      const activeId = isMasking ? activeMaskId : activeAiSubMaskId;
+      const activeId = activePaintMaskId;
+
+      if (!activeId) {
+        console.warn('[BRUSH DEBUG] Skipping stroke update because active mask id is missing');
+        return;
+      }
 
       if (activeSubMask?.type === Mask.AiSubject || activeSubMask?.type === Mask.QuickEraser) {
         const points = line.points;
@@ -860,6 +881,14 @@ const ImageCanvas = memo(
         };
 
         const existingLines = activeSubMask.parameters.lines || [];
+        
+        console.log('[BRUSH DEBUG] Adding brush stroke:', {
+          tool: imageSpaceLine.tool,
+          brushSize: imageSpaceLine.brushSize,
+          feather: imageSpaceLine.feather,
+          pointCount: imageSpaceLine.points.length,
+          existingLineCount: existingLines.length,
+        });
 
         updateSubMask(activeId, {
           parameters: {
@@ -869,8 +898,7 @@ const ImageCanvas = memo(
         });
       }
     }, [
-      activeAiSubMaskId,
-      activeMaskId,
+      activePaintMaskId,
       activeSubMask,
       adjustments.crop,
       brushSettings,
