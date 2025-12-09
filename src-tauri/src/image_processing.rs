@@ -858,34 +858,34 @@ fn get_global_adjustments_from_json(
             0.0
         },
         outer_glow_color_r: if is_visible("specialEffects") {
-            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ffffff");
+            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ff0000");
             if hex.starts_with('#') && hex.len() == 7 {
                 u8::from_str_radix(&hex[1..3], 16).unwrap_or(255) as f32 / 255.0
             } else {
-                1.0
+                1.0 // default to red if malformed
             }
         } else {
             1.0
         },
         outer_glow_color_g: if is_visible("specialEffects") {
-            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ffffff");
+            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ff0000");
             if hex.starts_with('#') && hex.len() == 7 {
                 u8::from_str_radix(&hex[3..5], 16).unwrap_or(255) as f32 / 255.0
             } else {
-                1.0
+                0.0
             }
         } else {
-            1.0
+            0.0
         },
         outer_glow_color_b: if is_visible("specialEffects") {
-            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ffffff");
+            let hex = js_adjustments["outerGlowColor"].as_str().unwrap_or("#ff0000");
             if hex.starts_with('#') && hex.len() == 7 {
                 u8::from_str_radix(&hex[5..7], 16).unwrap_or(255) as f32 / 255.0
             } else {
-                1.0
+                0.0
             }
         } else {
-            1.0
+            0.0
         },
         outer_glow_inner_color_r: if is_visible("specialEffects") {
             let hex = js_adjustments["outerGlowInnerColor"].as_str().unwrap_or("#ffffff");

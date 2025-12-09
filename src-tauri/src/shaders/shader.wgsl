@@ -371,31 +371,39 @@ fn apply_outer_glow(
     glow_noise: f32,
     blend_mode: u32,
     contour_type: u32,
-    inner_color: vec3<f32>,
-    mask_texture: texture_2d<f32>
+    inner_color: vec3<f32>
 ) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(input_texture));
     let coord_f = vec2<f32>(coords);
-    let mask_value = textureLoad(mask_texture, coords, 0).r;
+    let mask_value = sample_composite_mask(coords);
     var result = color;
 
     let base_opacity = clamp(glow_opacity / 100.0, 0.0, 1.0);
 
-    // Fill painted area with inner color so the neon core stays bright
+    // Fill painted area with inner color at full strength (no feathering)
     if (mask_value > 0.0 && base_opacity > 0.0) {
-        // Slightly favor full coverage when opacity is 100% to avoid transparency in the core.
-        let inner_strength = clamp(pow(mask_value, 0.5) * base_opacity, 0.0, 1.0);
-        result = mix(result, inner_color, inner_strength);
+        result = mix(result, inner_color, base_opacity);
     }
 
     if (glow_size <= 0.0 || glow_opacity <= 0.0) {
         return result;
     }
 
+    // If spread is zero, disable the outer glow entirely.
+    let spread_factor = clamp(glow_spread / 100.0, 0.0, 1.0);
+    if (spread_factor <= 0.0) {
+        return result;
+    }
+
     // Calculate glow intensity by sampling nearby mask pixels
     // Use a normalized Gaussian accumulation to avoid hard borders/rings.
-    let radius = clamp(i32(glow_size * 32.0), 1, 96);
-    let sigma = max(glow_size * 12.0, 1.0);
+    // Radius/falloff for the blur that drives the halo (wider to push glow outward)
+    // Make spread=100 dramatically thicker by boosting radius & sigma.
+    // Ensure a baseline thickness even at low spread.
+    let base_radius = glow_size * 80.0;            // baseline thickness
+    let spread_boost = mix(1.0, 3.5, spread_factor); // at 100% spread, ~3.5x radius
+    let radius = clamp(i32((base_radius * spread_boost)) + 1, 6, 640);
+    let sigma = max(glow_size * (24.0 + 36.0 * spread_factor), 2.0);
     var weighted_sum = 0.0;
     var weight_total = 0.0;
     
@@ -408,7 +416,7 @@ fn apply_outer_glow(
                 vec2<i32>(dims) - vec2<i32>(1)
             );
             
-            let sample_mask = textureLoad(mask_texture, vec2<u32>(sample_coord), 0).r;
+            let sample_mask = sample_composite_mask(vec2<u32>(sample_coord));
             let dist = length(vec2<f32>(offset));
             let falloff = exp(-(dist * dist) / (2.0 * sigma * sigma));
             weighted_sum += sample_mask * falloff;
@@ -421,22 +429,23 @@ fn apply_outer_glow(
         glow_intensity = weighted_sum / weight_total;
     }
 
-    // Suppress glow contribution where the mask is fully opaque to remove the hard cut line.
-    let inside_fade = 1.0 - smoothstep(0.6, 1.0, mask_value);
-    glow_intensity *= inside_fade;
-    
-    // Spread controls softness: lower spread -> softer rolloff, higher spread -> tighter edge
-    let spread_mix = clamp(glow_spread / 100.0, 0.0, 1.0);
-    glow_intensity = pow(glow_intensity, mix(2.2, 0.6, spread_mix));
-    
+    // Keep glow outside: subtract the mask and suppress inside contribution.
+    let glow_outside = max(glow_intensity - mask_value, 0.0) * (1.0 - smoothstep(0.0, 0.35, mask_value));
+
+    // Spread controls softness: lower spread -> softer rolloff, higher spread -> thicker edge
+    // At 100 spread, reduce exponent strongly so the halo stays wide.
+    let shaped = pow(glow_outside, mix(1.6, 0.25, spread_factor));
+
     // Apply contour shaping
-    glow_intensity = apply_contour(glow_intensity, contour_type);
+    let contoured = apply_contour(shaped, contour_type);
     
     // Add noise for texture/particle effect
     if (glow_noise > 0.0) {
         let noise_coord = coord_f * 0.01;
         let noise = gradient_noise(noise_coord);
-        glow_intensity *= mix(1.0, noise, glow_noise / 100.0);
+        glow_intensity = contoured * mix(1.0, noise, glow_noise / 100.0);
+    } else {
+        glow_intensity = contoured;
     }
     
     // Apply opacity
@@ -1145,6 +1154,15 @@ fn get_mask_influence(mask_index: u32, coords: vec2<u32>) -> f32 {
     }
 }
 
+fn sample_composite_mask(coords: vec2<u32>) -> f32 {
+    var max_val = 0.0;
+    for (var i = 0u; i < adjustments.mask_count; i = i + 1u) {
+        let v = get_mask_influence(i, coords);
+        if (v > max_val) { max_val = v; }
+    }
+    return max_val;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let out_dims = vec2<u32>(textureDimensions(output_texture));
@@ -1285,8 +1303,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             g.outer_glow_noise,
             g.outer_glow_blend_mode,
             g.outer_glow_contour,
-            inner_color,
-            mask0  // Use first mask or composite mask
+            inner_color
         );
     }
     
