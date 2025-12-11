@@ -4,6 +4,10 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+#[cfg(not(target_os = "android"))]
+mod ai_processing;
+#[cfg(target_os = "android")]
+#[path = "ai_processing_stub.rs"]
 mod ai_processing;
 mod comfyui_connector;
 mod culling;
@@ -19,6 +23,10 @@ mod panorama_stitching;
 mod panorama_utils;
 mod preset_converter;
 mod raw_processing;
+#[cfg(not(target_os = "android"))]
+mod tagging;
+#[cfg(target_os = "android")]
+#[path = "tagging_stub.rs"]
 mod tagging;
 mod tagging_utils;
 
@@ -2685,6 +2693,11 @@ fn apply_window_effect(theme: String, window: impl raw_window_handle::HasWindowH
     {
         let _ = (theme, window);
     }
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = (theme, window);
+    }
 }
 
 fn setup_logging(app_handle: &tauri::AppHandle) {
@@ -2779,9 +2792,13 @@ fn frontend_ready(app_handle: tauri::AppHandle, state: tauri::State<AppState>) -
     Ok(())
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(not(target_os = "android"))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             log::info!("New instance launched with args: {:?}. Focusing main window.", argv);
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(e) = window.unminimize() {
@@ -2798,12 +2815,21 @@ fn main() {
                     log::error!("Failed to emit open-with-file from single-instance handler: {}", e);
                 }
             }
-        }))
+        }));
+    }
+
+    builder = builder
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_shell::init());
+
+    #[cfg(not(target_os = "android"))]
+    {
+        builder = builder.plugin(tauri_plugin_process::init());
+    }
+
+    builder
         .setup(|app| {
             #[cfg(any(windows, target_os = "linux"))]
             {
@@ -2824,6 +2850,13 @@ fn main() {
                     }
                 }
 
+                #[cfg(target_os = "android")]
+                {
+                    if settings.processing_backend.as_deref().unwrap_or("auto") == "auto" {
+                        std::env::set_var("WGPU_BACKEND", "vulkan");
+                    }
+                }
+
                 if settings.linux_gpu_optimization.unwrap_or(true) {
                     #[cfg(target_os = "linux")]
                     {
@@ -2833,19 +2866,22 @@ fn main() {
                     }
                 }
 
-                let resource_path = app_handle
-                    .path()
-                    .resolve("resources", tauri::path::BaseDirectory::Resource)
-                    .expect("failed to resolve resource directory");
+                #[cfg(not(target_os = "android"))]
+                {
+                    let resource_path = app_handle
+                        .path()
+                        .resolve("resources", tauri::path::BaseDirectory::Resource)
+                        .expect("failed to resolve resource directory");
 
-                let ort_library_name = {
-                    #[cfg(target_os = "windows")] { "onnxruntime.dll" }
-                    #[cfg(target_os = "linux")] { "libonnxruntime.so" }
-                    #[cfg(target_os = "macos")] { "libonnxruntime.dylib" }
-                };
-                let ort_library_path = resource_path.join(ort_library_name);
-                std::env::set_var("ORT_DYLIB_PATH", &ort_library_path);
-                println!("Set ORT_DYLIB_PATH to: {}", ort_library_path.display());
+                    let ort_library_name = {
+                        #[cfg(target_os = "windows")] { "onnxruntime.dll" }
+                        #[cfg(target_os = "linux")] { "libonnxruntime.so" }
+                        #[cfg(target_os = "macos")] { "libonnxruntime.dylib" }
+                    };
+                    let ort_library_path = resource_path.join(ort_library_name);
+                    std::env::set_var("ORT_DYLIB_PATH", &ort_library_path);
+                    println!("Set ORT_DYLIB_PATH to: {}", ort_library_path.display());
+                }
             }
 
             setup_logging(&app_handle);
@@ -2866,10 +2902,14 @@ fn main() {
             let transparent = settings.transparent.unwrap_or(window_cfg.transparent);
             let decorations = settings.decorations.unwrap_or(window_cfg.decorations);
 
-            let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_cfg)
+            let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_cfg)
                 .unwrap()
-                .transparent(transparent)
-                .decorations(decorations)
+                .transparent(transparent);
+
+            #[cfg(not(target_os = "android"))]
+            let builder = builder.decorations(decorations);
+
+            let window = builder
                 .build()
                 .expect("Failed to build window");
 

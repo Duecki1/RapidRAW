@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "io.github.cybertimon.rapidraw",
+  "app": {
+    "security": {
+      "capabilities": ["mobile"]
+    },
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "RapidRAW",
+        "width": 1200,
+        "height": 800,
+        "transparent": false,
+        "decorations": false
+      }
+    ]
+  },
+  "bundle": {
+    "android": {
+      "minSdkVersion": 26
+    }
+  }
+}

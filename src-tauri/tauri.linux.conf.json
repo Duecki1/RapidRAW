@@ -10,7 +10,10 @@
         "transparent": false,
         "decorations": true
       }
-    ]
+    ],
+    "security": {
+      "capabilities": ["default"]
+    }
   },
   "bundle": {
     "linux": {

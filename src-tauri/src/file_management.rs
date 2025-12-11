@@ -44,6 +44,37 @@ use crate::tagging::COLOR_TAG_PREFIX;
 
 const THUMBNAIL_WIDTH: u32 = 640;
 
+#[cfg(not(target_os = "android"))]
+fn delete_path_to_trash(path: &Path) -> Result<(), String> {
+    trash::delete(path).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn delete_path_to_trash(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| e.to_string())
+    } else {
+        fs::remove_file(path).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn delete_paths_to_trash(paths: &[PathBuf]) -> Result<(), String> {
+    trash::delete_all(paths).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn delete_paths_to_trash(paths: &[PathBuf]) -> Result<(), String> {
+    for path in paths {
+        if path.is_dir() {
+            fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+        } else {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Preset {
     pub id: String,
@@ -1127,7 +1158,7 @@ pub fn rename_folder(path: String, new_name: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn delete_folder(path: String) -> Result<(), String> {
-    trash::delete(&path).map_err(|e| e.to_string())
+    delete_path_to_trash(Path::new(&path))
 }
 
 #[tauri::command]
@@ -1297,7 +1328,7 @@ pub fn move_files(source_paths: Vec<String>, destination_folder: String) -> Resu
     }
 
     if !all_files_to_trash.is_empty() {
-        trash::delete_all(&all_files_to_trash).map_err(|e| e.to_string())?;
+        delete_paths_to_trash(&all_files_to_trash)?;
     }
 
     Ok(())
@@ -1998,7 +2029,12 @@ pub fn show_in_finder(path: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        return Err("Show in file manager is not available on Android.".to_string());
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos"), not(target_os = "android")))]
     {
         if let Some(parent) = Path::new(&source_path_str).parent() {
             Command::new("xdg-open")
@@ -2008,8 +2044,10 @@ pub fn show_in_finder(path: String) -> Result<(), String> {
         } else {
             return Err("Could not get parent directory".into());
         }
+        return Ok(());
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     Ok(())
 }
 
@@ -2045,7 +2083,7 @@ pub fn delete_files_from_disk(paths: Vec<String>) -> Result<(), String> {
     }
 
     let final_paths_to_delete: Vec<PathBuf> = files_to_trash.into_iter().collect();
-    trash::delete_all(&final_paths_to_delete).map_err(|e| e.to_string())
+    delete_paths_to_trash(&final_paths_to_delete)
 }
 
 #[tauri::command]
@@ -2104,7 +2142,7 @@ pub fn delete_files_with_associated(paths: Vec<String>) -> Result<(), String> {
     }
 
     let final_paths_to_delete: Vec<PathBuf> = files_to_trash.into_iter().collect();
-    trash::delete_all(&final_paths_to_delete).map_err(|e| e.to_string())
+    delete_paths_to_trash(&final_paths_to_delete)
 }
 
 pub fn get_thumb_cache_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -2273,9 +2311,9 @@ pub async fn import_files(
                 }
 
                 if settings.delete_after_import {
-                    trash::delete(&source_path).map_err(|e| e.to_string())?;
+                    delete_path_to_trash(&source_path)?;
                     if source_sidecar.exists() {
-                        trash::delete(source_sidecar).map_err(|e| e.to_string())?;
+                        delete_path_to_trash(&source_sidecar)?;
                     }
                 }
 

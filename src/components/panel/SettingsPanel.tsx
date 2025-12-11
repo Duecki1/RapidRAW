@@ -18,6 +18,7 @@ import {
   Keyboard,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { platform } from '@tauri-apps/plugin-os';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { open } from '@tauri-apps/plugin-dialog';
 import { open as openLink } from '@tauri-apps/plugin-shell';
@@ -311,6 +312,13 @@ export default function SettingsPanel({
   });
   const [restartRequired, setRestartRequired] = useState(false);
   const [activeCategory, setActiveCategory] = useState('general');
+  const [isAndroid, setIsAndroid] = useState(false);
+
+  useEffect(() => {
+    platform()
+      .then((currentPlatform) => setIsAndroid(currentPlatform === 'android'))
+      .catch(() => setIsAndroid(false));
+  }, []);
 
   useEffect(() => {
     if (appSettings?.comfyuiAddress !== comfyUiAddress) {
@@ -329,6 +337,17 @@ export default function SettingsPanel({
     setRestartRequired(false);
   }, [appSettings]);
 
+  const relaunchIfSupported = async () => {
+    if (isAndroid) {
+      return;
+    }
+    try {
+      await relaunch();
+    } catch (err) {
+      console.error('Failed to relaunch application', err);
+    }
+  };
+
   const handleProcessingSettingChange = (key: string, value: any) => {
     setProcessingSettings((prev) => ({ ...prev, [key]: value }));
     if (key === 'processingBackend' || key === 'linuxGpuOptimization') {
@@ -344,7 +363,11 @@ export default function SettingsPanel({
       ...processingSettings,
     });
     await new Promise((resolve) => setTimeout(resolve, 200));
-    await relaunch();
+    if (isAndroid) {
+      setRestartRequired(false);
+      return;
+    }
+    await relaunchIfSupported();
   };
 
   const resetToDefaults = () => {
@@ -483,7 +506,7 @@ export default function SettingsPanel({
 
   const executeSetTransparent = async (transparent: boolean) => {
     onSettingsChange({ ...appSettings, transparent });
-    await relaunch();
+    await relaunchIfSupported();
   };
 
   const handleSetTransparent = (transparent: boolean) => {
@@ -921,7 +944,7 @@ export default function SettingsPanel({
                       />
                     </SettingItem>
 
-                    {restartRequired && (
+                    {restartRequired && !isAndroid && (
                       <>
                         <div className="p-3 bg-blue-900/20 text-blue-300 border border-blue-500/50 rounded-lg text-sm flex items-center gap-3">
                           <Info size={18} />

@@ -64,6 +64,13 @@ fn download_and_verify(
 
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if target_os == "android" {
+        println!("cargo:warning=Skipping ONNX Runtime download on Android targets.");
+        println!("cargo:rerun-if-changed=build.rs");
+        tauri_build::build();
+        return;
+    }
+
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
     let (download_filename, lib_name, expected_hash) =

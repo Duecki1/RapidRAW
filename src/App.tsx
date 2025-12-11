@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { homeDir } from '@tauri-apps/api/path';
+import { platform as getPlatform } from '@tauri-apps/plugin-os';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import debounce from 'lodash.debounce';
 import { ClerkProvider } from '@clerk/clerk-react';
@@ -262,6 +263,22 @@ function App() {
     filmstrip: true,
   });
   const [isAdjusting, setIsAdjusting] = useState(false);
+  // Keeps the latest adjustment render request so we can drop stale frames while dragging sliders.
+  const adjustmentRenderStateRef = useRef<{
+    queuedAdjustments: Adjustments | null;
+    queuedVersion: number;
+    lastCompletedVersion: number;
+    inFlightVersion: number | null;
+    isInFlight: boolean;
+  }>({
+    queuedAdjustments: null,
+    queuedVersion: 0,
+    lastCompletedVersion: 0,
+    inFlightVersion: null,
+    isInFlight: false,
+  });
+  const renderImagePathRef = useRef<string | null>(null);
+  const selectedImagePathRef = useRef<string | null>(null);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [isFullScreenLoading, setIsFullScreenLoading] = useState(false);
   const [fullScreenUrl, setFullScreenUrl] = useState<string | null>(null);
@@ -383,6 +400,8 @@ function App() {
   const isProgrammaticZoom = useRef(false);
   const isInitialMount = useRef(true);
   const currentFolderPathRef = useRef<string>(currentFolderPath);
+  const [platformType, setPlatformType] = useState<string | null>(null);
+  const [hasPromptedAndroidRoot, setHasPromptedAndroidRoot] = useState(false);
 
   const [exportState, setExportState] = useState<ExportState>({
     errorMessage: '',
@@ -400,6 +419,9 @@ function App() {
   useEffect(() => {
     currentFolderPathRef.current = currentFolderPath;
   }, [currentFolderPath]);
+  useEffect(() => {
+    selectedImagePathRef.current = selectedImage?.path || null;
+  }, [selectedImage?.path]);
 
   useEffect(() => {
     if (!isCopied) {
@@ -1026,20 +1048,74 @@ function App() {
     return list;
   }, [imageList, sortCriteria, imageRatings, filterCriteria, supportedTypes, searchCriteria, appSettings]);
 
-  const applyAdjustments = useCallback(
-    debounce((currentAdjustments) => {
+  const resetAdjustmentRenderQueue = useCallback(() => {
+    adjustmentRenderStateRef.current = {
+      queuedAdjustments: null,
+      queuedVersion: 0,
+      lastCompletedVersion: 0,
+      inFlightVersion: null,
+      isInFlight: false,
+    };
+    renderImagePathRef.current = null;
+    setIsAdjusting(false);
+  }, []);
+
+  const startApplyAdjustments = useCallback(() => {
+    if (!selectedImage?.isReady) {
+      return;
+    }
+
+    const queue = adjustmentRenderStateRef.current;
+    if (!queue.queuedAdjustments) {
+      return;
+    }
+
+    queue.isInFlight = true;
+    queue.inFlightVersion = queue.queuedVersion;
+    renderImagePathRef.current = selectedImage?.path || null;
+    setIsAdjusting(true);
+
+    invoke(Invokes.ApplyAdjustments, { jsAdjustments: queue.queuedAdjustments }).catch((err) => {
+      console.error('Failed to invoke apply_adjustments:', err);
+      setError(`Processing failed: ${err}`);
+      queue.isInFlight = false;
+      queue.inFlightVersion = null;
+      setIsAdjusting(false);
+    });
+  }, [selectedImage?.isReady, selectedImage?.path]);
+
+  const queueApplyAdjustments = useCallback(
+    (currentAdjustments: Adjustments) => {
       if (!selectedImage?.isReady) {
         return;
       }
-      setIsAdjusting(true);
-      invoke(Invokes.ApplyAdjustments, { jsAdjustments: currentAdjustments }).catch((err) => {
-        console.error('Failed to invoke apply_adjustments:', err);
-        setError(`Processing failed: ${err}`);
-        setIsAdjusting(false);
-      });
-    }, 50),
-    [selectedImage?.isReady],
+      const queue = adjustmentRenderStateRef.current;
+      queue.queuedVersion += 1;
+      queue.queuedAdjustments = currentAdjustments;
+
+      if (!queue.isInFlight) {
+        startApplyAdjustments();
+      }
+    },
+    [selectedImage?.isReady, startApplyAdjustments],
   );
+
+  const handlePreviewRenderComplete = useCallback(() => {
+    const queue = adjustmentRenderStateRef.current;
+    queue.lastCompletedVersion = queue.inFlightVersion || queue.lastCompletedVersion;
+    queue.inFlightVersion = null;
+    queue.isInFlight = false;
+
+    if (
+      queue.queuedVersion > queue.lastCompletedVersion &&
+      queue.queuedAdjustments &&
+      selectedImage?.isReady
+    ) {
+      startApplyAdjustments();
+    } else {
+      setIsAdjusting(false);
+    }
+  }, [selectedImage?.isReady, startApplyAdjustments]);
 
   const debouncedGenerateUncroppedPreview = useCallback(
     debounce((currentAdjustments) => {
@@ -1217,6 +1293,12 @@ function App() {
       .finally(() => {
         isInitialMount.current = false;
       });
+  }, []);
+
+  useEffect(() => {
+    getPlatform()
+      .then((value) => setPlatformType(value))
+      .catch((err) => console.error('Failed to detect platform:', err));
   }, []);
 
   useEffect(() => {
@@ -2108,7 +2190,7 @@ function App() {
       if (selectedImage?.path === path) {
         return;
       }
-      applyAdjustments.cancel();
+      resetAdjustmentRenderQueue();
       debouncedSave.cancel();
 
       setSelectedImage({
@@ -2150,7 +2232,7 @@ function App() {
       setZoom(1);
       setIsLibraryExportPanelVisible(false);
     },
-    [selectedImage?.path, applyAdjustments, debouncedSave, thumbnails, resetAdjustmentsHistory],
+    [selectedImage?.path, debouncedSave, thumbnails, resetAdjustmentsHistory, resetAdjustmentRenderQueue],
   );
 
   useKeyboardShortcuts({
@@ -2205,11 +2287,14 @@ function App() {
     const listeners = [
       listen('preview-update-final', (event: any) => {
         if (isEffectActive) {
+          if (!selectedImagePathRef.current || renderImagePathRef.current !== selectedImagePathRef.current) {
+            return;
+          }
           const imageData = new Uint8Array(event.payload);
           const blob = new Blob([imageData], { type: 'image/jpeg' });
           const url = URL.createObjectURL(blob);
           setFinalPreviewUrl(url);
-          setIsAdjusting(false);
+          handlePreviewRenderComplete();
         }
       }),
       listen('preview-update-uncropped', (event: any) => {
@@ -2352,7 +2437,7 @@ function App() {
       isEffectActive = false;
       listeners.forEach((p) => p.then((unlisten) => unlisten()));
     };
-  }, [handleRefreshFolderTree, handleSelectSubfolder]);
+  }, [handlePreviewRenderComplete, handleRefreshFolderTree, handleSelectSubfolder]);
 
   useEffect(() => {
     if ([Status.Success, Status.Error, Status.Cancelled].includes(exportState.status)) {
@@ -2519,14 +2604,13 @@ function App() {
 
   useEffect(() => {
     if (selectedImage?.isReady) {
-      applyAdjustments(adjustments);
+      queueApplyAdjustments(adjustments);
       debouncedSave(selectedImage.path, adjustments);
     }
     return () => {
-      applyAdjustments.cancel();
       debouncedSave.cancel();
     };
-  }, [adjustments, selectedImage?.path, selectedImage?.isReady, applyAdjustments, debouncedSave]);
+  }, [adjustments, selectedImage?.path, selectedImage?.isReady, queueApplyAdjustments, debouncedSave]);
 
   useEffect(() => {
     if (activeRightPanel === Panel.Crop && selectedImage?.isReady) {
@@ -2536,9 +2620,19 @@ function App() {
     return () => debouncedGenerateUncroppedPreview.cancel();
   }, [adjustments, activeRightPanel, selectedImage?.isReady, debouncedGenerateUncroppedPreview]);
 
-  const handleOpenFolder = async () => {
+  const handleOpenFolder = useCallback(async () => {
     try {
-      const selected = await open({ directory: true, multiple: false, defaultPath: await homeDir() });
+      const isAndroid = (platformType || '').toLowerCase().includes('android');
+      const dialogOptions: any = { directory: true, multiple: false };
+      if (!isAndroid) {
+        dialogOptions.defaultPath = await homeDir();
+      }
+
+      if (isAndroid) {
+        setHasPromptedAndroidRoot(true);
+      }
+
+      const selected = await open(dialogOptions);
       if (typeof selected === 'string') {
         setRootPath(selected);
         await handleSelectSubfolder(selected, true);
@@ -2547,7 +2641,17 @@ function App() {
       console.error('Failed to open directory dialog:', err);
       setError('Failed to open folder selection dialog.');
     }
-  };
+  }, [handleSelectSubfolder, platformType]);
+
+  useEffect(() => {
+    if (!appSettings || rootPath || hasPromptedAndroidRoot || !platformType) {
+      return;
+    }
+    if (platformType.toLowerCase().includes('android')) {
+      setHasPromptedAndroidRoot(true);
+      handleOpenFolder();
+    }
+  }, [appSettings, rootPath, platformType, hasPromptedAndroidRoot, handleOpenFolder]);
 
   const handleContinueSession = () => {
     const restore = async () => {
