@@ -2949,6 +2949,24 @@ pub fn run() {
 
             #[cfg(target_os = "android")]
             {
+                // Ensure Pictures/RapidRaw exists on Android and use it as default gallery
+                if let Some(settings_dir) = app_handle.path().app_config_dir().ok() {
+                    // attempt to create the gallery folder in shared Pictures
+                    let rapidraw_gallery = std::path::PathBuf::from("/storage/emulated/0/Pictures/RapidRaw");
+                    if let Err(e) = std::fs::create_dir_all(&rapidraw_gallery) {
+                        log::warn!("Failed to create RapidRaw gallery directory {:?}: {}", rapidraw_gallery, e);
+                    } else {
+                        log::info!("Ensured RapidRaw gallery directory exists: {:?}", rapidraw_gallery);
+                    }
+                    // If the saved settings don't already have a last_root_path, save this as default
+                    let mut settings: AppSettings = crate::file_management::load_settings(app_handle.clone()).unwrap_or_default();
+                    if settings.last_root_path.is_none() {
+                        settings.last_root_path = Some(rapidraw_gallery.to_string_lossy().to_string());
+                        if let Err(e) = crate::file_management::save_settings(settings, app_handle.clone()) {
+                            log::warn!("Failed to save default settings with RapidRaw gallery: {}", e);
+                        }
+                    }
+                }
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &window_cfg)
                     .unwrap()
                     .build()
@@ -3030,6 +3048,7 @@ pub fn run() {
             file_management::save_presets,
             file_management::load_settings,
             file_management::save_settings,
+            file_management::get_default_gallery_path,
             file_management::reset_adjustments_for_paths,
             file_management::apply_auto_adjustments_to_paths,
             file_management::handle_import_presets_from_file,

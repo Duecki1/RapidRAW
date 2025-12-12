@@ -317,7 +317,16 @@ fn default_adjustment_visibility() -> HashMap<String, bool> {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            last_root_path: None,
+            last_root_path: {
+                #[cfg(target_os = "android")]
+                {
+                    Some("/storage/emulated/0/Pictures/RapidRaw".to_string())
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    None
+                }
+            },
             pinned_folders: Vec::new(),
             editor_preview_resolution: Some(1920),
             sort_criteria: None,
@@ -1787,6 +1796,14 @@ pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
     }
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_default_gallery_path(app_handle: tauri::AppHandle) -> Result<Option<String>, String> {
+    match load_settings(app_handle) {
+        Ok(settings) => Ok(settings.last_root_path),
+        Err(e) => Err(e),
+    }
 }
 
 #[tauri::command]

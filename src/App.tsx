@@ -2542,14 +2542,32 @@ function App() {
       const currentPlatform = await platform();
       
       if (currentPlatform === 'android') {
-        // On Android, use the file picker to select a folder
-        const selected = await open({ 
-          directory: true, 
-          multiple: false,
-        });
-        if (typeof selected === 'string') {
-          setRootPath(selected);
-          await handleSelectSubfolder(selected, true);
+        // On Android, try the file picker, but fall back to the app gallery folder
+        try {
+          const selected = await open({ 
+            directory: true, 
+            multiple: false,
+          });
+          if (typeof selected === 'string') {
+            setRootPath(selected);
+            await handleSelectSubfolder(selected, true);
+            return;
+          }
+        } catch (e) {
+          console.warn('Folder picker failed on Android, falling back to RapidRaw gallery.', e);
+        }
+
+        // Ask backend for default gallery path
+        try {
+          // @ts-ignore
+          const galleryPath: string | null = await window.__TAURI__.invoke('get_default_gallery_path');
+          if (galleryPath) {
+            setRootPath(galleryPath);
+            await handleSelectSubfolder(galleryPath, true);
+            return;
+          }
+        } catch (e) {
+          console.error('Failed to get default gallery path from backend:', e);
         }
       } else {
         // On desktop platforms, use the standard folder picker with default path
@@ -2568,6 +2586,27 @@ function App() {
       setError(`Failed to open folder selection dialog: ${err}`);
     }
   };
+
+  // On mount, if running on Android, set default gallery path automatically
+  useEffect(() => {
+    const initAndroidGallery = async () => {
+      try {
+        const currentPlatform = await platform();
+        if (currentPlatform === 'android') {
+          // @ts-ignore
+          const galleryPath: string | null = await window.__TAURI__.invoke('get_default_gallery_path');
+          if (galleryPath) {
+            setRootPath(galleryPath);
+            await handleSelectSubfolder(galleryPath, true);
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to initialize Android gallery path:', e);
+      }
+    };
+
+    initAndroidGallery();
+  }, []);
 
   const handleContinueSession = () => {
     const restore = async () => {
