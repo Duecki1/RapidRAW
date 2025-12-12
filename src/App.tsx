@@ -3698,6 +3698,7 @@ function App() {
                           activeMaskId={activeMaskId}
                           adjustments={adjustments}
                           aiModelDownloadStatus={aiModelDownloadStatus}
+                          appSettings={appSettings}
                           brushSettings={brushSettings}
                           copiedMask={copiedMask}
                           histogram={histogram}
