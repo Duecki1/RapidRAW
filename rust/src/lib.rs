@@ -1,3 +1,6 @@
+//Code taken from RapidRAW by CyberTimon
+//https://github.com/CyberTimon/RapidRAW
+
 mod raw_processing;
 
 use anyhow::{Context, Result};

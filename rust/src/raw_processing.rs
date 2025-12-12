@@ -1,3 +1,6 @@
+//Code taken from RapidRAW by CyberTimon
+//https://github.com/CyberTimon/RapidRAW
+
 use anyhow::Result;
 use image::{DynamicImage, ImageBuffer, Rgba};
 use rawler::{
