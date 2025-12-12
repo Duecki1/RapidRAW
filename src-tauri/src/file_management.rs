@@ -29,6 +29,29 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+fn delete_path(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn delete_all(paths: &[PathBuf]) -> std::io::Result<()> {
+    for path in paths {
+        delete_path(path)?;
+    }
+    Ok(())
+}
+
+fn delete_path_to_trash(path: &Path) -> Result<(), String> {
+    delete_path(path).map_err(|e| e.to_string())
+}
+
+fn delete_all_to_trash(paths: &[PathBuf]) -> Result<(), String> {
+    delete_all(paths).map_err(|e| e.to_string())
+}
+
 use crate::AppState;
 use crate::formats::{is_raw_file, is_supported_image_file};
 use crate::gpu_processing;
@@ -420,19 +443,28 @@ pub async fn read_exif_for_paths(
 
 #[tauri::command]
 pub fn list_images_in_dir(path: String) -> Result<Vec<ImageFile>, String> {
-    let entries = fs::read_dir(&path).map_err(|e| e.to_string())?;
+    log::info!("Listing images in directory: {}", path);
+    let entries = fs::read_dir(&path).map_err(|e| {
+        log::error!("Failed to read directory {}: {}", path, e);
+        e.to_string()
+    })?;
     let mut image_files = HashMap::new();
     let mut sidecars_by_source = HashMap::new();
 
     let sidecar_re = Regex::new(r"^(.*)\.([a-f0-9]{6})\.rrdata$").unwrap();
     let original_sidecar_re = Regex::new(r"^(.*)\.rrdata$").unwrap();
 
+    let mut entry_count = 0;
     for entry in entries.filter_map(Result::ok) {
+        entry_count += 1;
         let entry_path = entry.path();
         let file_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
+        
+        log::debug!("Checking file: {}", file_name);
 
         if is_supported_image_file(&entry_path.to_string_lossy()) {
             let path_str = entry_path.to_string_lossy().into_owned();
+            log::info!("Found supported image: {}", path_str);
             image_files.insert(path_str, entry_path.clone());
         } else if file_name.ends_with(".rrdata") {
             if let Some(caps) = sidecar_re.captures(&file_name) {
@@ -453,6 +485,8 @@ pub fn list_images_in_dir(path: String) -> Result<Vec<ImageFile>, String> {
             }
         }
     }
+    
+    let image_count = image_files.len();
 
     let mut result_list = Vec::new();
     for (path_str, path_buf) in image_files {
@@ -499,6 +533,9 @@ pub fn list_images_in_dir(path: String) -> Result<Vec<ImageFile>, String> {
             });
         }
     }
+    
+    log::info!("Found {} entries in directory, {} supported images", entry_count, image_count);
+    log::info!("Returning {} files total (including virtual copies)", result_list.len());
 
     Ok(result_list)
 }
@@ -1127,7 +1164,7 @@ pub fn rename_folder(path: String, new_name: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn delete_folder(path: String) -> Result<(), String> {
-    trash::delete(&path).map_err(|e| e.to_string())
+    delete_path_to_trash(Path::new(&path))
 }
 
 #[tauri::command]
@@ -1297,7 +1334,7 @@ pub fn move_files(source_paths: Vec<String>, destination_folder: String) -> Resu
     }
 
     if !all_files_to_trash.is_empty() {
-        trash::delete_all(&all_files_to_trash).map_err(|e| e.to_string())?;
+        delete_all_to_trash(&all_files_to_trash)?;
     }
 
     Ok(())
@@ -2045,7 +2082,7 @@ pub fn delete_files_from_disk(paths: Vec<String>) -> Result<(), String> {
     }
 
     let final_paths_to_delete: Vec<PathBuf> = files_to_trash.into_iter().collect();
-    trash::delete_all(&final_paths_to_delete).map_err(|e| e.to_string())
+    delete_all_to_trash(&final_paths_to_delete)
 }
 
 #[tauri::command]
@@ -2104,7 +2141,7 @@ pub fn delete_files_with_associated(paths: Vec<String>) -> Result<(), String> {
     }
 
     let final_paths_to_delete: Vec<PathBuf> = files_to_trash.into_iter().collect();
-    trash::delete_all(&final_paths_to_delete).map_err(|e| e.to_string())
+    delete_all_to_trash(&final_paths_to_delete)
 }
 
 pub fn get_thumb_cache_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -2273,9 +2310,9 @@ pub async fn import_files(
                 }
 
                 if settings.delete_after_import {
-                    trash::delete(&source_path).map_err(|e| e.to_string())?;
+                    delete_path_to_trash(&source_path)?;
                     if source_sidecar.exists() {
-                        trash::delete(source_sidecar).map_err(|e| e.to_string())?;
+                        delete_path_to_trash(&source_sidecar)?;
                     }
                 }
 

@@ -66,40 +66,45 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
-    let (download_filename, lib_name, expected_hash) =
-        match (target_os.as_str(), target_arch.as_str()) {
-            ("windows", "x86_64") => (
-                "onnxruntime-windows-x86_64.dll",
-                "onnxruntime.dll",
-                "579b636403983254346a5c1d80bd28f1519cd1e284cd204f8d4ff41f8d711559",
-            ),
-            ("windows", "aarch64") => (
-                "onnxruntime-windows-aarch64.dll",
-                "onnxruntime.dll",
-                "79281671a386ed1baab9dbdbb09fe55f99577011472e9526cf9d0b468bb6bcc7",
-            ),
-            ("linux", "x86_64") => (
-                "libonnxruntime-linux-x86_64.so",
-                "libonnxruntime.so",
-                "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673",
-            ),
-            ("linux", "aarch64") => (
-                "libonnxruntime-linux-aarch64.so",
-                "libonnxruntime.so",
-                "0afd69a0ae38c5099fd0e8604dda398ac43dee67cd9c6394b5142b19e82528de",
-            ),
-            ("macos", "x86_64") => (
-                "libonnxruntime-macos-x86_64.dylib",
-                "libonnxruntime.dylib",
-                "283e595e61cf65df7a6b1d59a1616cbd35c8b6399dd90d799d99b71a3ff83160",
-            ),
-            ("macos", "aarch64") => (
-                "libonnxruntime-macos-aarch64.dylib",
-                "libonnxruntime.dylib",
-                "2b885992d3d6fa4130d39ec84a80d7504ff52750027c547bb22c86165f19406a",
-            ),
-            _ => panic!("Unsupported target: {}-{}", target_os, target_arch),
-        };
+    if target_os == "android" {
+        println!("cargo:warning=Skipping ONNX Runtime download for Android target.");
+        tauri_build::build();
+        return;
+    }
+
+    let (download_filename, lib_name, expected_hash) = match (target_os.as_str(), target_arch.as_str()) {
+        ("windows", "x86_64") => (
+            "onnxruntime-windows-x86_64.dll",
+            "onnxruntime.dll",
+            "579b636403983254346a5c1d80bd28f1519cd1e284cd204f8d4ff41f8d711559",
+        ),
+        ("windows", "aarch64") => (
+            "onnxruntime-windows-aarch64.dll",
+            "onnxruntime.dll",
+            "79281671a386ed1baab9dbdbb09fe55f99577011472e9526cf9d0b468bb6bcc7",
+        ),
+        ("linux", "x86_64") => (
+            "libonnxruntime-linux-x86_64.so",
+            "libonnxruntime.so",
+            "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673",
+        ),
+        ("linux", "aarch64") => (
+            "libonnxruntime-linux-aarch64.so",
+            "libonnxruntime.so",
+            "0afd69a0ae38c5099fd0e8604dda398ac43dee67cd9c6394b5142b19e82528de",
+        ),
+        ("macos", "x86_64") => (
+            "libonnxruntime-macos-x86_64.dylib",
+            "libonnxruntime.dylib",
+            "283e595e61cf65df7a6b1d59a1616cbd35c8b6399dd90d799d99b71a3ff83160",
+        ),
+        ("macos", "aarch64") => (
+            "libonnxruntime-macos-aarch64.dylib",
+            "libonnxruntime.dylib",
+            "2b885992d3d6fa4130d39ec84a80d7504ff52750027c547bb22c86165f19406a",
+        ),
+        _ => panic!("Unsupported target: {}-{}", target_os, target_arch),
+    };
 
     let resources_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("resources");
     fs::create_dir_all(&resources_dir).unwrap();

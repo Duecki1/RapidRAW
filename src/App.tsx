@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { homeDir } from '@tauri-apps/api/path';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { platform } from '@tauri-apps/plugin-os';
 import debounce from 'lodash.debounce';
 import { ClerkProvider } from '@clerk/clerk-react';
 import clsx from 'clsx';
@@ -2538,14 +2539,33 @@ function App() {
 
   const handleOpenFolder = async () => {
     try {
-      const selected = await open({ directory: true, multiple: false, defaultPath: await homeDir() });
-      if (typeof selected === 'string') {
-        setRootPath(selected);
-        await handleSelectSubfolder(selected, true);
+      const currentPlatform = await platform();
+      
+      if (currentPlatform === 'android') {
+        // On Android, use the file picker to select a folder
+        const selected = await open({ 
+          directory: true, 
+          multiple: false,
+        });
+        if (typeof selected === 'string') {
+          setRootPath(selected);
+          await handleSelectSubfolder(selected, true);
+        }
+      } else {
+        // On desktop platforms, use the standard folder picker with default path
+        const selected = await open({ 
+          directory: true, 
+          multiple: false, 
+          defaultPath: await homeDir() 
+        });
+        if (typeof selected === 'string') {
+          setRootPath(selected);
+          await handleSelectSubfolder(selected, true);
+        }
       }
     } catch (err) {
       console.error('Failed to open directory dialog:', err);
-      setError('Failed to open folder selection dialog.');
+      setError(`Failed to open folder selection dialog: ${err}`);
     }
   };
 
