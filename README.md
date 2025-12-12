@@ -1,4 +1,7 @@
-![Screenshot_20251212_131033_KawaiiRawEditor](https://github.com/user-attachments/assets/d7810d19-b297-479a-8ca7-36dcdf26c6fc)
+![Screenshot_20251212_153228_KawaiiRawEditor](https://github.com/user-attachments/assets/c1088104-acea-435e-a874-04b29267131b)
+<img width="2560" height="1600" alt="Screenshot_20251212_153239" src="https://github.com/user-attachments/assets/f662f9fc-3bde-4c8d-8344-9ae6784a31da" />
+
+
 
 This is a fork of RapidRaw.
 https://github.com/CyberTimon/RapidRAW
