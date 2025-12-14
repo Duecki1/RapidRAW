@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -530,6 +531,8 @@ private fun EditorScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var debouncedAdjustmentJson by remember { mutableStateOf(adjustments.toJson()) }
+    var prevAdjustments by remember { mutableStateOf(adjustments) }
+    var predictedAdjustmentJson by remember { mutableStateOf(adjustments.toJson()) }
 
     // Load RAW file and adjustments from storage
     LaunchedEffect(galleryItem.projectId) {
@@ -572,50 +575,122 @@ private fun EditorScreen(
     }
 
     LaunchedEffect(adjustments) {
-        delay(200)
+        // Predict a short step ahead based on recent change direction.
+        val factor = 0.25f // how far ahead to predict (25% of recent delta)
+        fun predict(curr: Float, prev: Float, min: Float, max: Float): Float {
+            val predicted = curr + (curr - prev) * factor
+            return predicted.coerceIn(min, max)
+        }
+
+        val predicted = AdjustmentState(
+            brightness = predict(adjustments.brightness, prevAdjustments.brightness, -5f, 5f),
+            contrast = predict(adjustments.contrast, prevAdjustments.contrast, -100f, 100f),
+            highlights = predict(adjustments.highlights, prevAdjustments.highlights, -100f, 100f),
+            shadows = predict(adjustments.shadows, prevAdjustments.shadows, -100f, 100f),
+            whites = predict(adjustments.whites, prevAdjustments.whites, -100f, 100f),
+            blacks = predict(adjustments.blacks, prevAdjustments.blacks, -100f, 100f),
+            saturation = predict(adjustments.saturation, prevAdjustments.saturation, -100f, 100f),
+            temperature = predict(adjustments.temperature, prevAdjustments.temperature, -100f, 100f),
+            tint = predict(adjustments.tint, prevAdjustments.tint, -100f, 100f),
+            vibrance = predict(adjustments.vibrance, prevAdjustments.vibrance, -100f, 100f),
+            clarity = predict(adjustments.clarity, prevAdjustments.clarity, -100f, 100f),
+            dehaze = predict(adjustments.dehaze, prevAdjustments.dehaze, -100f, 100f),
+            structure = predict(adjustments.structure, prevAdjustments.structure, -100f, 100f),
+            centre = predict(adjustments.centre, prevAdjustments.centre, -100f, 100f),
+            sharpness = predict(adjustments.sharpness, prevAdjustments.sharpness, -100f, 100f),
+            lumaNoiseReduction = predict(adjustments.lumaNoiseReduction, prevAdjustments.lumaNoiseReduction, 0f, 100f),
+            colorNoiseReduction = predict(adjustments.colorNoiseReduction, prevAdjustments.colorNoiseReduction, 0f, 100f),
+            chromaticAberrationRedCyan = predict(adjustments.chromaticAberrationRedCyan, prevAdjustments.chromaticAberrationRedCyan, -100f, 100f),
+            chromaticAberrationBlueYellow = predict(adjustments.chromaticAberrationBlueYellow, prevAdjustments.chromaticAberrationBlueYellow, -100f, 100f),
+            toneMapper = adjustments.toneMapper
+        )
+
+        predictedAdjustmentJson = predicted.toJson()
+
+        // Debounce saving + full-res trigger as before
+        delay(20)
         debouncedAdjustmentJson = adjustments.toJson()
-        // Save adjustments to storage
         coroutineScope.launch(Dispatchers.IO) {
             storage.saveAdjustments(galleryItem.projectId, debouncedAdjustmentJson)
         }
+
+        prevAdjustments = adjustments
     }
 
-    LaunchedEffect(rawBytes, debouncedAdjustmentJson) {
+    LaunchedEffect(rawBytes, predictedAdjustmentJson, prevAdjustments) {
         val raw = rawBytes ?: return@LaunchedEffect
         isLoading = true
         errorMessage = null
-        val previewBytes = withContext(Dispatchers.Default) {
+
+        // Launch super low quality preview (immediate feedback) using predicted adjustments
+        val superLowJob = launch(Dispatchers.Default) {
+            val superLowBytes = runCatching {
+                LibRawDecoder.lowlowdecode(raw, predictedAdjustmentJson)
+            }.getOrNull()
+
+            if (superLowBytes != null) {
+                val bitmap = superLowBytes.decodeToBitmap()
+                previewBitmap = bitmap
+            }
+        }
+        Log.e("Image rendering", "Rendering Image using predicted values")
+        // Wait for super low quality to finish OR get cancelled
+        superLowJob.join()
+        // Short delay before low quality
+        delay(500)
+
+        // Launch low quality preview (will be cancelled if adjustments change) using predicted adjustments
+        val previewJob = launch(Dispatchers.Default) {
+            val previewBytes = runCatching {
+                LibRawDecoder.lowdecode(raw, predictedAdjustmentJson)
+            }.getOrNull()
+
+            if (previewBytes == null) {
+                errorMessage = "Failed to render preview."
+            } else {
+                val bitmap = previewBytes.decodeToBitmap()
+                previewBitmap = bitmap
+            }
+        }
+        Log.e("Image rendering", "Rendering Image using predicted values")
+        // Wait for preview to finish OR get cancelled
+        previewJob.join()
+        // Now wait for debounce before full quality
+        delay(500)
+
+        // Full quality render
+        val fullBytes = withContext(Dispatchers.Default) {
             runCatching { LibRawDecoder.decode(raw, debouncedAdjustmentJson) }.getOrNull()
         }
-        if (previewBytes == null) {
+
+        if (fullBytes == null) {
             errorMessage = "Failed to render preview."
         } else {
-            val bitmap = previewBytes.decodeToBitmap()
+            val bitmap = fullBytes.decodeToBitmap()
             previewBitmap = bitmap
-            
+
             // Generate and save thumbnail
             bitmap?.let { bmp ->
                 withContext(Dispatchers.IO) {
-                    // Scale down to thumbnail size
                     val maxSize = 512
                     val scale = minOf(maxSize.toFloat() / bmp.width, maxSize.toFloat() / bmp.height)
                     val scaledWidth = (bmp.width * scale).toInt()
                     val scaledHeight = (bmp.height * scale).toInt()
                     val thumbnail = Bitmap.createScaledBitmap(bmp, scaledWidth, scaledHeight, true)
-                    
-                    // Compress to JPEG
+
                     val outputStream = java.io.ByteArrayOutputStream()
                     thumbnail.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
                     val thumbnailBytes = outputStream.toByteArray()
-                    
+
                     storage.saveThumbnail(galleryItem.projectId, thumbnailBytes)
-                    
+
                     if (thumbnail != bmp) {
                         thumbnail.recycle()
                     }
                 }
             }
         }
+        Log.e("Image rendering", "Rendering Image using real values")
         isLoading = false
     }
 

@@ -650,12 +650,27 @@ fn render_raw(
     let highlight_compression = 2.5;  // RapidRAW default
     let dynamic_image = develop_raw_image(raw_bytes, fast_demosaic, highlight_compression)
         .context("Failed to decode RAW image")?;
+    // If a maximum size was requested, downscale BEFORE the per-pixel adjustments
+    // to avoid performing expensive color math at full sensor resolution.
+    let mut dynamic_image = dynamic_image;
+    if let (Some(max_w), Some(max_h)) = (max_width, max_height) {
+        if dynamic_image.width() > max_w || dynamic_image.height() > max_h {
+            // Fit within the requested box while preserving aspect ratio.
+            let w = dynamic_image.width() as f32;
+            let h = dynamic_image.height() as f32;
+            let scale = (max_w as f32 / w).min(max_h as f32 / h);
+            let target_w = ((w * scale).max(1.0)) as u32;
+            let target_h = ((h * scale).max(1.0)) as u32;
+            // Use a faster filter for preview downscale (Triangle is a good quality/speed tradeoff).
+            dynamic_image = dynamic_image.resize(target_w, target_h, FilterType::Triangle);
+        }
+    }
 
     let parsed_adjustments = parse_adjustments(adjustments_json);
     let adjustment_values = parsed_adjustments.normalized(&ADJUSTMENT_SCALES);
-    
+
     let use_basic_tone_mapper = matches!(adjustment_values.tone_mapper, ToneMapper::Basic);
-    
+
     let linear_buffer = dynamic_image.to_rgba32f();
     let width = linear_buffer.width();
     let height = linear_buffer.height();
@@ -679,6 +694,8 @@ fn render_raw(
     });
 
     let mut final_image = DynamicImage::ImageRgba8(result_buffer);
+    // We already downscaled earlier for previews; apply final resize only if caller still requested
+    // a different size than what we've already produced.
     if let (Some(max_w), Some(max_h)) = (max_width, max_height) {
         if final_image.width() > max_w || final_image.height() > max_h {
             final_image = final_image.resize(max_w, max_h, FilterType::Lanczos3);
@@ -745,6 +762,57 @@ fn read_adjustments_json(env: &mut JNIEnv, adjustments: JString) -> Option<Strin
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_lowdecode(
+    mut env: JNIEnv,
+    _: JClass,
+    raw_data: JByteArray,
+    adjustments_json: JString,
+) -> jbyteArray {
+    ensure_logger();
+    let bytes = match convert_raw_array(&env, raw_data) {
+        Some(b) => b,
+        None => return ptr::null_mut(),
+    };
+
+    let adjustments = read_adjustments_json(&mut env, adjustments_json);
+
+    // Request a small fast preview (300x300) for interactive slider updates.
+    match render_raw(&bytes, adjustments.as_deref(), true, Some(300), Some(300)) {
+        Ok(payload) => make_byte_array(&env, &payload),
+        Err(err) => {
+            error!("Failed to render preview: {}", err);
+            ptr::null_mut()
+        }
+    }
+}
+
+
+#[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_lowlowdecode(
+    mut env: JNIEnv,
+    _: JClass,
+    raw_data: JByteArray,
+    adjustments_json: JString,
+) -> jbyteArray {
+    ensure_logger();
+    let bytes = match convert_raw_array(&env, raw_data) {
+        Some(b) => b,
+        None => return ptr::null_mut(),
+    };
+
+    let adjustments = read_adjustments_json(&mut env, adjustments_json);
+
+    // Request a small fast preview (300x300) for interactive slider updates.
+    match render_raw(&bytes, adjustments.as_deref(), true, Some(100), Some(100)) {
+        Ok(payload) => make_byte_array(&env, &payload),
+        Err(err) => {
+            error!("Failed to render preview: {}", err);
+            ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_decode(
     mut env: JNIEnv,
     _: JClass,
@@ -759,6 +827,7 @@ pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_decode(
 
     let adjustments = read_adjustments_json(&mut env, adjustments_json);
 
+    // Request a small fast preview (300x300) for interactive slider updates.
     match render_raw(&bytes, adjustments.as_deref(), true, Some(1920), Some(1080)) {
         Ok(payload) => make_byte_array(&env, &payload),
         Err(err) => {

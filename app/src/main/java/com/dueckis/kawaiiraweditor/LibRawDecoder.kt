@@ -6,5 +6,7 @@ object LibRawDecoder {
     }
 
     external fun decode(rawData: ByteArray, adjustmentsJson: String): ByteArray?
+    external fun lowlowdecode(rawData: ByteArray, adjustmentsJson: String): ByteArray?
+    external fun lowdecode(rawData: ByteArray, adjustmentsJson: String): ByteArray?
     external fun decodeFullRes(rawData: ByteArray, adjustmentsJson: String): ByteArray?
 }
