@@ -10,7 +10,6 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -62,6 +61,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -84,15 +84,21 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalConfiguration
 import com.dueckis.kawaiiraweditor.ui.theme.KawaiiRawEditorTheme
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 import kotlin.ranges.ClosedFloatingPointRange
 
@@ -240,6 +246,11 @@ private data class AdjustmentControl(
     val range: ClosedFloatingPointRange<Float>,
     val step: Float,
     val formatter: (Float) -> String = { value -> String.format(Locale.US, "%.0f", value) }
+)
+
+private data class RenderRequest(
+    val version: Long,
+    val adjustments: AdjustmentState
 )
 
 private val basicSection = listOf(
@@ -518,7 +529,6 @@ private fun EditorScreen(
 
     val context = LocalContext.current
     val storage = remember { ProjectStorage(context) }
-    val coroutineScope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
     val configuration = LocalConfiguration.current
     val isTablet = configuration.screenWidthDp >= 600
@@ -530,9 +540,14 @@ private fun EditorScreen(
     var isExporting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
-    var debouncedAdjustmentJson by remember { mutableStateOf(adjustments.toJson()) }
-    var prevAdjustments by remember { mutableStateOf(adjustments) }
-    var predictedAdjustmentJson by remember { mutableStateOf(adjustments.toJson()) }
+
+    val renderVersion = remember { AtomicLong(0L) }
+    val lastPreviewVersion = remember { AtomicLong(0L) }
+    val renderRequests = remember { Channel<RenderRequest>(capacity = Channel.CONFLATED) }
+    val renderDispatcher = remember { Executors.newSingleThreadExecutor().asCoroutineDispatcher() }
+    DisposableEffect(renderDispatcher) {
+        onDispose { renderDispatcher.close() }
+    }
 
     // Load RAW file and adjustments from storage
     LaunchedEffect(galleryItem.projectId) {
@@ -575,123 +590,110 @@ private fun EditorScreen(
     }
 
     LaunchedEffect(adjustments) {
-        // Predict a short step ahead based on recent change direction.
-        val factor = 0.25f // how far ahead to predict (25% of recent delta)
-        fun predict(curr: Float, prev: Float, min: Float, max: Float): Float {
-            val predicted = curr + (curr - prev) * factor
-            return predicted.coerceIn(min, max)
+        val version = renderVersion.incrementAndGet()
+        renderRequests.trySend(RenderRequest(version = version, adjustments = adjustments))
+
+        // Debounce persisting adjustments (I/O) for slider drags.
+        delay(350)
+        val json = withContext(Dispatchers.Default) { adjustments.toJson() }
+        withContext(Dispatchers.IO) {
+            storage.saveAdjustments(galleryItem.projectId, json)
         }
-
-        val predicted = AdjustmentState(
-            brightness = predict(adjustments.brightness, prevAdjustments.brightness, -5f, 5f),
-            contrast = predict(adjustments.contrast, prevAdjustments.contrast, -100f, 100f),
-            highlights = predict(adjustments.highlights, prevAdjustments.highlights, -100f, 100f),
-            shadows = predict(adjustments.shadows, prevAdjustments.shadows, -100f, 100f),
-            whites = predict(adjustments.whites, prevAdjustments.whites, -100f, 100f),
-            blacks = predict(adjustments.blacks, prevAdjustments.blacks, -100f, 100f),
-            saturation = predict(adjustments.saturation, prevAdjustments.saturation, -100f, 100f),
-            temperature = predict(adjustments.temperature, prevAdjustments.temperature, -100f, 100f),
-            tint = predict(adjustments.tint, prevAdjustments.tint, -100f, 100f),
-            vibrance = predict(adjustments.vibrance, prevAdjustments.vibrance, -100f, 100f),
-            clarity = predict(adjustments.clarity, prevAdjustments.clarity, -100f, 100f),
-            dehaze = predict(adjustments.dehaze, prevAdjustments.dehaze, -100f, 100f),
-            structure = predict(adjustments.structure, prevAdjustments.structure, -100f, 100f),
-            centre = predict(adjustments.centre, prevAdjustments.centre, -100f, 100f),
-            sharpness = predict(adjustments.sharpness, prevAdjustments.sharpness, -100f, 100f),
-            lumaNoiseReduction = predict(adjustments.lumaNoiseReduction, prevAdjustments.lumaNoiseReduction, 0f, 100f),
-            colorNoiseReduction = predict(adjustments.colorNoiseReduction, prevAdjustments.colorNoiseReduction, 0f, 100f),
-            chromaticAberrationRedCyan = predict(adjustments.chromaticAberrationRedCyan, prevAdjustments.chromaticAberrationRedCyan, -100f, 100f),
-            chromaticAberrationBlueYellow = predict(adjustments.chromaticAberrationBlueYellow, prevAdjustments.chromaticAberrationBlueYellow, -100f, 100f),
-            toneMapper = adjustments.toneMapper
-        )
-
-        predictedAdjustmentJson = predicted.toJson()
-
-        // Debounce saving + full-res trigger as before
-        delay(20)
-        debouncedAdjustmentJson = adjustments.toJson()
-        coroutineScope.launch(Dispatchers.IO) {
-            storage.saveAdjustments(galleryItem.projectId, debouncedAdjustmentJson)
-        }
-
-        prevAdjustments = adjustments
     }
 
-    LaunchedEffect(rawBytes, predictedAdjustmentJson, prevAdjustments) {
+    LaunchedEffect(rawBytes) {
         val raw = rawBytes ?: return@LaunchedEffect
-        isLoading = true
-        errorMessage = null
 
-        // Launch super low quality preview (immediate feedback) using predicted adjustments
-        val superLowJob = launch(Dispatchers.Default) {
-            val superLowBytes = runCatching {
-                LibRawDecoder.lowlowdecode(raw, predictedAdjustmentJson)
-            }.getOrNull()
+        // Ensure we always start with a render request for the current state.
+        renderRequests.trySend(
+            RenderRequest(
+                version = renderVersion.incrementAndGet(),
+                adjustments = adjustments
+            )
+        )
 
-            if (superLowBytes != null) {
-                val bitmap = superLowBytes.decodeToBitmap()
-                previewBitmap = bitmap
+        var currentRequest = renderRequests.receive()
+        while (true) {
+            while (true) {
+                val next = renderRequests.tryReceive().getOrNull() ?: break
+                currentRequest = next
             }
-        }
-        Log.e("Image rendering", "Rendering Image using predicted values")
-        // Wait for super low quality to finish OR get cancelled
-        superLowJob.join()
-        // Short delay before low quality
-        delay(500)
 
-        // Launch low quality preview (will be cancelled if adjustments change) using predicted adjustments
-        val previewJob = launch(Dispatchers.Default) {
-            val previewBytes = runCatching {
-                LibRawDecoder.lowdecode(raw, predictedAdjustmentJson)
-            }.getOrNull()
+            val requestVersion = currentRequest.version
+            val requestJson = withContext(renderDispatcher) { currentRequest.adjustments.toJson() }
 
-            if (previewBytes == null) {
-                errorMessage = "Failed to render preview."
-            } else {
-                val bitmap = previewBytes.decodeToBitmap()
-                previewBitmap = bitmap
+            // Stage 1: super-low quality (fast feedback while dragging).
+            val superLowBitmap = withContext(renderDispatcher) {
+                val bytes = runCatching { LibRawDecoder.lowlowdecode(raw, requestJson) }.getOrNull()
+                bytes?.decodeToBitmap()
             }
-        }
-        Log.e("Image rendering", "Rendering Image using predicted values")
-        // Wait for preview to finish OR get cancelled
-        previewJob.join()
-        // Now wait for debounce before full quality
-        delay(500)
+            if (superLowBitmap != null && requestVersion > lastPreviewVersion.get()) {
+                previewBitmap = superLowBitmap
+                lastPreviewVersion.set(requestVersion)
+            }
 
-        // Full quality render
-        val fullBytes = withContext(Dispatchers.Default) {
-            runCatching { LibRawDecoder.decode(raw, debouncedAdjustmentJson) }.getOrNull()
-        }
+            // If the user is still moving the slider, keep updating the super-low preview only.
+            val maybeUpdatedAfterSuperLow = withTimeoutOrNull(60) { renderRequests.receive() }
+            if (maybeUpdatedAfterSuperLow != null) {
+                currentRequest = maybeUpdatedAfterSuperLow
+                continue
+            }
 
-        if (fullBytes == null) {
-            errorMessage = "Failed to render preview."
-        } else {
-            val bitmap = fullBytes.decodeToBitmap()
-            previewBitmap = bitmap
+            // Stage 2: low quality (still fast, but clearer).
+            val lowBitmap = withContext(renderDispatcher) {
+                val bytes = runCatching { LibRawDecoder.lowdecode(raw, requestJson) }.getOrNull()
+                bytes?.decodeToBitmap()
+            }
+            if (lowBitmap != null && requestVersion > lastPreviewVersion.get()) {
+                previewBitmap = lowBitmap
+                lastPreviewVersion.set(requestVersion)
+            }
 
-            // Generate and save thumbnail
-            bitmap?.let { bmp ->
-                withContext(Dispatchers.IO) {
-                    val maxSize = 512
-                    val scale = minOf(maxSize.toFloat() / bmp.width, maxSize.toFloat() / bmp.height)
-                    val scaledWidth = (bmp.width * scale).toInt()
-                    val scaledHeight = (bmp.height * scale).toInt()
-                    val thumbnail = Bitmap.createScaledBitmap(bmp, scaledWidth, scaledHeight, true)
+            // Debounce before running the expensive preview render.
+            val maybeUpdatedAfterLow = withTimeoutOrNull(180) { renderRequests.receive() }
+            if (maybeUpdatedAfterLow != null) {
+                currentRequest = maybeUpdatedAfterLow
+                continue
+            }
 
-                    val outputStream = java.io.ByteArrayOutputStream()
-                    thumbnail.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
-                    val thumbnailBytes = outputStream.toByteArray()
+            isLoading = true
+            val fullBitmap = withContext(renderDispatcher) {
+                val bytes = runCatching { LibRawDecoder.decode(raw, requestJson) }.getOrNull()
+                bytes?.decodeToBitmap()
+            }
+            isLoading = false
 
-                    storage.saveThumbnail(galleryItem.projectId, thumbnailBytes)
+            if (requestVersion == renderVersion.get()) {
+                errorMessage = if (fullBitmap == null) "Failed to render preview." else null
+                if (fullBitmap != null) {
+                    previewBitmap = fullBitmap
+                    lastPreviewVersion.set(requestVersion)
+                }
 
-                    if (thumbnail != bmp) {
-                        thumbnail.recycle()
+                // Generate and save thumbnail only for the latest completed render.
+                fullBitmap?.let { bmp ->
+                    withContext(Dispatchers.IO) {
+                        val maxSize = 512
+                        val scale = minOf(maxSize.toFloat() / bmp.width, maxSize.toFloat() / bmp.height)
+                        val scaledWidth = (bmp.width * scale).toInt()
+                        val scaledHeight = (bmp.height * scale).toInt()
+                        val thumbnail = Bitmap.createScaledBitmap(bmp, scaledWidth, scaledHeight, true)
+
+                        val outputStream = java.io.ByteArrayOutputStream()
+                        thumbnail.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
+                        val thumbnailBytes = outputStream.toByteArray()
+
+                        storage.saveThumbnail(galleryItem.projectId, thumbnailBytes)
+
+                        if (thumbnail != bmp) {
+                            thumbnail.recycle()
+                        }
                     }
                 }
             }
+
+            currentRequest = renderRequests.receive()
         }
-        Log.e("Image rendering", "Rendering Image using real values")
-        isLoading = false
     }
 
     Surface(modifier = Modifier.fillMaxSize()) {
@@ -764,8 +766,9 @@ private fun EditorScreen(
                             // Export button at bottom
                             ExportButton(
                                 rawBytes = rawBytes,
+                                adjustments = adjustments,
                                 isExporting = isExporting,
-                                debouncedAdjustmentJson = debouncedAdjustmentJson,
+                                nativeDispatcher = renderDispatcher,
                                 context = context,
                                 onExportStart = { isExporting = true },
                                 onExportComplete = { success, message ->
@@ -909,8 +912,9 @@ private fun EditorScreen(
                             ) {
                                 ExportButton(
                                     rawBytes = rawBytes,
+                                    adjustments = adjustments,
                                     isExporting = isExporting,
-                                    debouncedAdjustmentJson = debouncedAdjustmentJson,
+                                    nativeDispatcher = renderDispatcher,
                                     context = context,
                                     onExportStart = { isExporting = true },
                                     onExportComplete = { success, message ->
@@ -994,8 +998,9 @@ private fun EditorScreen(
 @Composable
 private fun ExportButton(
     rawBytes: ByteArray?,
+    adjustments: AdjustmentState,
     isExporting: Boolean,
-    debouncedAdjustmentJson: String,
+    nativeDispatcher: CoroutineDispatcher,
     context: Context,
     onExportStart: () -> Unit,
     onExportComplete: (Boolean, String) -> Unit
@@ -1006,10 +1011,11 @@ private fun ExportButton(
         onClick = {
             val raw = rawBytes
             if (isExporting || raw == null) return@Button
-            val currentJson = debouncedAdjustmentJson
+            val currentAdjustments = adjustments
             onExportStart()
             coroutineScope.launch {
-                val fullBytes = withContext(Dispatchers.Default) {
+                val currentJson = withContext(Dispatchers.Default) { currentAdjustments.toJson() }
+                val fullBytes = withContext(nativeDispatcher) {
                     runCatching { LibRawDecoder.decodeFullRes(raw, currentJson) }.getOrNull()
                 }
                 if (fullBytes == null) {

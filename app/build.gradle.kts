@@ -94,19 +94,30 @@ val buildRust = tasks.register("buildRust") {
     description = "Compiles the Rust native library for each Android ABI"
     doLast {
         val osName = System.getProperty("os.name").orEmpty().lowercase(Locale.ROOT)
+        val isWindows = osName.contains("windows")
         val hostTag = when {
             osName.contains("windows") -> "windows-x86_64"
             osName.contains("mac") -> "darwin-x86_64"
             else -> "linux-x86_64"
         }
 
+        fun resolveTool(toolchainBin: File, baseName: String, vararg extensions: String): File {
+            val candidates = buildList {
+                extensions.forEach { ext -> add(File(toolchainBin, "$baseName$ext")) }
+                add(File(toolchainBin, baseName))
+            }
+            return candidates.firstOrNull { it.exists() }
+                ?: error("NDK tool not found: tried ${candidates.joinToString { it.absolutePath }}")
+        }
+
         rustAbiTargets.forEach { (_, target) ->
             val normalizedTarget = target.uppercase(Locale.ROOT).replace('-', '_')
             val toolchainBin = File(ndkRoot, "toolchains/llvm/prebuilt/$hostTag/bin")
             val linkerTarget = if (target == "armv7-linux-androideabi") "armv7a-linux-androideabi" else target
-            val clang = File(toolchainBin, "${linkerTarget}${androidApiLevel}-clang")
-            val ar = File(toolchainBin, "llvm-ar")
-            val ranlib = File(toolchainBin, "llvm-ranlib")
+            val clangBase = "${linkerTarget}${androidApiLevel}-clang"
+            val clang = if (isWindows) resolveTool(toolchainBin, clangBase, ".cmd", ".exe") else resolveTool(toolchainBin, clangBase)
+            val ar = if (isWindows) resolveTool(toolchainBin, "llvm-ar", ".exe") else resolveTool(toolchainBin, "llvm-ar")
+            val ranlib = if (isWindows) resolveTool(toolchainBin, "llvm-ranlib", ".exe") else resolveTool(toolchainBin, "llvm-ranlib")
 
             exec {
                 workingDir = rustProjectDir

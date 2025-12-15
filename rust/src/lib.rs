@@ -776,8 +776,8 @@ pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_lowdecode(
 
     let adjustments = read_adjustments_json(&mut env, adjustments_json);
 
-    // Request a small fast preview (300x300) for interactive slider updates.
-    match render_raw(&bytes, adjustments.as_deref(), true, Some(300), Some(300)) {
+    // Request a small fast preview for interactive slider updates.
+    match render_raw(&bytes, adjustments.as_deref(), true, Some(256), Some(256)) {
         Ok(payload) => make_byte_array(&env, &payload),
         Err(err) => {
             error!("Failed to render preview: {}", err);
@@ -802,8 +802,8 @@ pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_lowlowdeco
 
     let adjustments = read_adjustments_json(&mut env, adjustments_json);
 
-    // Request a small fast preview (300x300) for interactive slider updates.
-    match render_raw(&bytes, adjustments.as_deref(), true, Some(100), Some(100)) {
+    // Request a tiny preview for interactive slider updates while dragging.
+    match render_raw(&bytes, adjustments.as_deref(), true, Some(64), Some(64)) {
         Ok(payload) => make_byte_array(&env, &payload),
         Err(err) => {
             error!("Failed to render preview: {}", err);
@@ -827,8 +827,8 @@ pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_decode(
 
     let adjustments = read_adjustments_json(&mut env, adjustments_json);
 
-    // Request a small fast preview (300x300) for interactive slider updates.
-    match render_raw(&bytes, adjustments.as_deref(), true, Some(1920), Some(1080)) {
+    // Request a preview render (export uses decodeFullRes).
+    match render_raw(&bytes, adjustments.as_deref(), true, Some(1280), Some(720)) {
         Ok(payload) => make_byte_array(&env, &payload),
         Err(err) => {
             error!("Failed to render preview: {}", err);
