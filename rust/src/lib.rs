@@ -8,12 +8,13 @@ use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, Image
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::jbyteArray;
 use jni::JNIEnv;
-use log::{error, info};
+use log::error;
 #[cfg(target_os = "android")]
 use log::Level;
 use raw_processing::develop_raw_image;
 use serde::Deserialize;
 use serde_json::from_str;
+use serde_json::Value;
 use std::ops::AddAssign;
 use std::ptr;
 use std::sync::Once;
@@ -160,7 +161,7 @@ impl AddAssign for AdjustmentValues {
 
 #[derive(Clone, Default, Deserialize)]
 #[serde(default)]
-struct MaskPayload {
+struct LegacyMaskPayload {
     enabled: bool,
     exposure: f32,
     brightness: f32,
@@ -175,7 +176,7 @@ struct MaskPayload {
     vibrance: f32,
 }
 
-impl MaskPayload {
+impl LegacyMaskPayload {
     fn to_values(&self) -> AdjustmentValues {
         AdjustmentValues {
             exposure: self.exposure,
@@ -192,6 +193,125 @@ impl MaskPayload {
             ..Default::default()
         }
     }
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MaskAdjustmentsPayload {
+    exposure: f32,
+    brightness: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    saturation: f32,
+    temperature: f32,
+    tint: f32,
+    vibrance: f32,
+    clarity: f32,
+    dehaze: f32,
+    structure: f32,
+    centre: f32,
+    sharpness: f32,
+    luma_noise_reduction: f32,
+    color_noise_reduction: f32,
+    chromatic_aberration_red_cyan: f32,
+    chromatic_aberration_blue_yellow: f32,
+}
+
+impl MaskAdjustmentsPayload {
+    fn to_values(&self) -> AdjustmentValues {
+        AdjustmentValues {
+            exposure: self.exposure,
+            brightness: self.brightness,
+            contrast: self.contrast,
+            highlights: self.highlights,
+            shadows: self.shadows,
+            whites: self.whites,
+            blacks: self.blacks,
+            saturation: self.saturation,
+            temperature: self.temperature,
+            tint: self.tint,
+            vibrance: self.vibrance,
+            clarity: self.clarity,
+            dehaze: self.dehaze,
+            structure: self.structure,
+            centre: self.centre,
+            sharpness: self.sharpness,
+            luma_noise_reduction: self.luma_noise_reduction,
+            color_noise_reduction: self.color_noise_reduction,
+            chromatic_aberration_red_cyan: self.chromatic_aberration_red_cyan,
+            chromatic_aberration_blue_yellow: self.chromatic_aberration_blue_yellow,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum SubMaskMode {
+    #[default]
+    Additive,
+    Subtractive,
+}
+
+fn default_mask_opacity() -> f32 {
+    100.0
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct SubMaskPayload {
+    id: String,
+    #[serde(rename = "type")]
+    mask_type: String,
+    visible: bool,
+    mode: SubMaskMode,
+    parameters: serde_json::Value,
+}
+
+fn default_brush_feather() -> f32 {
+    0.5
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct BrushPointPayload {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct BrushLinePayload {
+    tool: String,
+    brush_size: f32,
+    points: Vec<BrushPointPayload>,
+    #[serde(default = "default_brush_feather")]
+    feather: f32,
+    #[serde(default)]
+    order: u64,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct BrushMaskParameters {
+    lines: Vec<BrushLinePayload>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MaskDefinitionPayload {
+    id: String,
+    name: String,
+    visible: bool,
+    invert: bool,
+    #[serde(default = "default_mask_opacity")]
+    opacity: f32,
+    adjustments: MaskAdjustmentsPayload,
+    #[serde(rename = "subMasks")]
+    sub_masks: Vec<SubMaskPayload>,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -219,7 +339,7 @@ struct AdjustmentsPayload {
     chromatic_aberration_blue_yellow: f32,
     #[serde(default)]
     tone_mapper: ToneMapper,
-    masks: Vec<MaskPayload>,
+    masks: Vec<Value>,
 }
 
 impl AdjustmentsPayload {
@@ -262,28 +382,259 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn parse_adjustments(json: Option<&str>) -> AdjustmentValues {
+fn parse_adjustments_payload(json: Option<&str>) -> AdjustmentsPayload {
     if let Some(data) = json {
         let trimmed = data.trim();
         if trimmed.is_empty() {
-            return AdjustmentValues::default();
+            return AdjustmentsPayload::default();
         }
         match from_str::<AdjustmentsPayload>(trimmed) {
-            Ok(payload) => {
-                let mut values = payload.to_values();
-                for mask in payload.masks.iter().filter(|mask| mask.enabled) {
-                    values += mask.to_values();
-                }
-                values
-            }
+            Ok(payload) => payload,
             Err(err) => {
                 error!("Failed to parse adjustments JSON: {}", err);
-                AdjustmentValues::default()
+                AdjustmentsPayload::default()
             }
         }
     } else {
-        AdjustmentValues::default()
+        AdjustmentsPayload::default()
     }
+}
+
+struct MaskRuntime {
+    opacity_factor: f32,
+    invert: bool,
+    adjustments: AdjustmentValues,
+    bitmap: Option<Vec<u8>>,
+}
+
+fn parse_masks(values: Vec<Value>, width: u32, height: u32) -> Vec<MaskRuntime> {
+    values
+        .into_iter()
+        .filter_map(|value| {
+            // RapidRAW-style mask definitions include `subMasks` and `visible`.
+            if value.get("subMasks").is_some() {
+                let def: MaskDefinitionPayload = serde_json::from_value(value).ok()?;
+                if !def.visible {
+                    return None;
+                }
+                let opacity_factor = (def.opacity / 100.0).clamp(0.0, 1.0);
+                let bitmap = Some(generate_brush_mask(&def.sub_masks, width, height));
+                return Some(MaskRuntime {
+                    opacity_factor,
+                    invert: def.invert,
+                    adjustments: def.adjustments.to_values().normalized(&ADJUSTMENT_SCALES),
+                    bitmap,
+                });
+            }
+
+            // Backwards-compatible legacy format (top-level enabled + adjustment fields).
+            if value.get("enabled").is_some() {
+                let legacy: LegacyMaskPayload = serde_json::from_value(value).ok()?;
+                if !legacy.enabled {
+                    return None;
+                }
+                return Some(MaskRuntime {
+                    opacity_factor: 1.0,
+                    invert: false,
+                    adjustments: legacy.to_values().normalized(&ADJUSTMENT_SCALES),
+                    bitmap: None,
+                });
+            }
+
+            None
+        })
+        .collect()
+}
+
+fn apply_feathered_circle_add(target: &mut [u8], width: u32, height: u32, cx: f32, cy: f32, radius: f32, feather: f32) {
+    if radius <= 0.5 {
+        return;
+    }
+    let feather_amount = feather.clamp(0.0, 1.0);
+    let inner_radius = radius * (1.0 - feather_amount);
+    let outer_radius = radius;
+    let outer_sq = outer_radius * outer_radius;
+
+    let x0 = (cx - outer_radius).floor().max(0.0) as i32;
+    let y0 = (cy - outer_radius).floor().max(0.0) as i32;
+    let x1 = (cx + outer_radius).ceil().min((width - 1) as f32) as i32;
+    let y1 = (cy + outer_radius).ceil().min((height - 1) as f32) as i32;
+
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist_sq = dx * dx + dy * dy;
+            if dist_sq > outer_sq {
+                continue;
+            }
+
+            let dist = dist_sq.sqrt();
+            let intensity = if dist <= inner_radius {
+                1.0
+            } else if outer_radius > inner_radius {
+                1.0 - ((dist - inner_radius) / (outer_radius - inner_radius)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            if intensity <= 0.0 {
+                continue;
+            }
+
+            let idx = (y as u32 * width + x as u32) as usize;
+            let v = (intensity * 255.0).clamp(0.0, 255.0) as u8;
+            target[idx] = target[idx].max(v);
+        }
+    }
+}
+
+fn apply_feathered_circle_sub(target: &mut [u8], width: u32, height: u32, cx: f32, cy: f32, radius: f32, feather: f32) {
+    if radius <= 0.5 {
+        return;
+    }
+    let feather_amount = feather.clamp(0.0, 1.0);
+    let inner_radius = radius * (1.0 - feather_amount);
+    let outer_radius = radius;
+    let outer_sq = outer_radius * outer_radius;
+
+    let x0 = (cx - outer_radius).floor().max(0.0) as i32;
+    let y0 = (cy - outer_radius).floor().max(0.0) as i32;
+    let x1 = (cx + outer_radius).ceil().min((width - 1) as f32) as i32;
+    let y1 = (cy + outer_radius).ceil().min((height - 1) as f32) as i32;
+
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist_sq = dx * dx + dy * dy;
+            if dist_sq > outer_sq {
+                continue;
+            }
+
+            let dist = dist_sq.sqrt();
+            let intensity = if dist <= inner_radius {
+                1.0
+            } else if outer_radius > inner_radius {
+                1.0 - ((dist - inner_radius) / (outer_radius - inner_radius)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            if intensity <= 0.0 {
+                continue;
+            }
+
+            let idx = (y as u32 * width + x as u32) as usize;
+            let current = target[idx] as f32 / 255.0;
+            let next = (current * (1.0 - intensity)).clamp(0.0, 1.0);
+            target[idx] = (next * 255.0).round() as u8;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BrushEvent {
+    order: u64,
+    mode: SubMaskMode,
+    feather: f32,
+    radius: f32,
+    points: Vec<(f32, f32)>,
+}
+
+fn generate_brush_mask(sub_masks: &[SubMaskPayload], width: u32, height: u32) -> Vec<u8> {
+    let len = (width * height) as usize;
+    let mut mask = vec![0u8; len];
+    let w_f = width as f32;
+    let h_f = height as f32;
+    let base_dim = width.min(height) as f32;
+
+    fn denorm(value: f32, max: f32) -> f32 {
+        let max_coord = (max - 1.0).max(1.0);
+        if value <= 1.5 {
+            (value * max_coord).clamp(0.0, max_coord)
+        } else {
+            value
+        }
+    }
+
+    let mut events: Vec<BrushEvent> = Vec::new();
+
+    for sub_mask in sub_masks.iter().filter(|s| s.visible) {
+        if sub_mask.mask_type != "brush" {
+            continue;
+        }
+
+        let params: BrushMaskParameters = serde_json::from_value(sub_mask.parameters.clone()).unwrap_or_default();
+        for line in params.lines {
+            if line.points.is_empty() {
+                continue;
+            }
+
+            let effective_mode = if line.tool == "eraser" {
+                SubMaskMode::Subtractive
+            } else {
+                sub_mask.mode
+            };
+
+            let brush_size_px = if line.brush_size <= 1.5 {
+                (line.brush_size * base_dim).max(0.0)
+            } else {
+                line.brush_size
+            };
+            let radius = (brush_size_px / 2.0).max(1.0);
+            let feather = line.feather.clamp(0.0, 1.0);
+
+            let points: Vec<(f32, f32)> = line
+                .points
+                .into_iter()
+                .map(|p| (denorm(p.x, w_f), denorm(p.y, h_f)))
+                .collect();
+
+            events.push(BrushEvent {
+                order: line.order,
+                mode: effective_mode,
+                feather,
+                radius,
+                points,
+            });
+        }
+    }
+
+    events.sort_by_key(|e| e.order);
+
+    for event in events {
+        let step_size = (event.radius * (1.0 - event.feather) / 2.0).max(1.0);
+
+        let apply_circle = |mask: &mut [u8], cx: f32, cy: f32| {
+            if event.mode == SubMaskMode::Additive {
+                apply_feathered_circle_add(mask, width, height, cx, cy, event.radius, event.feather);
+            } else {
+                apply_feathered_circle_sub(mask, width, height, cx, cy, event.radius, event.feather);
+            }
+        };
+
+        if event.points.len() == 1 {
+            let (x, y) = event.points[0];
+            apply_circle(&mut mask, x, y);
+            continue;
+        }
+
+        for pair in event.points.windows(2) {
+            let (x1, y1) = pair[0];
+            let (x2, y2) = pair[1];
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            let dist = (dx * dx + dy * dy).sqrt().max(0.001);
+            let steps = (dist / step_size).ceil() as i32;
+            for i in 0..=steps {
+                let t = i as f32 / steps.max(1) as f32;
+                apply_circle(&mut mask, x1 + dx * t, y1 + dy * t);
+            }
+        }
+    }
+
+    mask
 }
 
 fn get_luma(color: [f32; 3]) -> f32 {
@@ -666,14 +1017,16 @@ fn render_raw(
         }
     }
 
-    let parsed_adjustments = parse_adjustments(adjustments_json);
-    let adjustment_values = parsed_adjustments.normalized(&ADJUSTMENT_SCALES);
+    let payload = parse_adjustments_payload(adjustments_json);
+    let adjustment_values = payload.to_values().normalized(&ADJUSTMENT_SCALES);
 
     let use_basic_tone_mapper = matches!(adjustment_values.tone_mapper, ToneMapper::Basic);
 
     let linear_buffer = dynamic_image.to_rgba32f();
     let width = linear_buffer.width();
     let height = linear_buffer.height();
+
+    let mask_runtimes = parse_masks(payload.masks, width, height);
 
     let result_buffer: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_fn(width, height, |x, y| {
         let pixel = linear_buffer.get_pixel(x, y);
@@ -684,7 +1037,34 @@ fn render_raw(
         // Apply default RAW processing (brightness + contrast boost for Basic tone mapper)
         colors = apply_default_raw_processing(colors, use_basic_tone_mapper);
         
-        let adjusted = apply_color_adjustments(colors, &adjustment_values);
+        let idx = (y * width + x) as usize;
+
+        // RapidRAW-like mask compositing: apply globals once, then for each mask
+        // mix toward a separately-adjusted result by mask influence.
+        let mut composite = apply_color_adjustments(colors, &adjustment_values);
+        for mask in &mask_runtimes {
+            let mut selection = if let Some(bitmap) = &mask.bitmap {
+                bitmap.get(idx).copied().unwrap_or(0) as f32 / 255.0
+            } else {
+                1.0
+            };
+            if mask.invert {
+                selection = 1.0 - selection;
+            }
+            let influence = (selection * mask.opacity_factor).clamp(0.0, 1.0);
+            if influence <= 0.001 {
+                continue;
+            }
+
+            let mask_adjusted = apply_color_adjustments(composite, &mask.adjustments);
+            composite = [
+                composite[0] + (mask_adjusted[0] - composite[0]) * influence,
+                composite[1] + (mask_adjusted[1] - composite[1]) * influence,
+                composite[2] + (mask_adjusted[2] - composite[2]) * influence,
+            ];
+        }
+
+        let adjusted = composite;
         Rgba([
             clamp_to_u8(linear_to_srgb(adjusted[0]) * 255.0),
             clamp_to_u8(linear_to_srgb(adjusted[1]) * 255.0),

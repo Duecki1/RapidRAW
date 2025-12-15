@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -17,10 +19,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -49,6 +55,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FilledTonalButton
@@ -59,12 +66,15 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -77,6 +87,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -158,6 +173,33 @@ private data class AdjustmentState(
     val chromaticAberrationBlueYellow: Float = 0f,
     val toneMapper: String = "basic"
 ) {
+    fun toJsonObject(includeToneMapper: Boolean = true): JSONObject {
+        return JSONObject().apply {
+            put("brightness", brightness)
+            put("contrast", contrast)
+            put("highlights", highlights)
+            put("shadows", shadows)
+            put("whites", whites)
+            put("blacks", blacks)
+            put("saturation", saturation)
+            put("temperature", temperature)
+            put("tint", tint)
+            put("vibrance", vibrance)
+            put("clarity", clarity)
+            put("dehaze", dehaze)
+            put("structure", structure)
+            put("centre", centre)
+            put("sharpness", sharpness)
+            put("lumaNoiseReduction", lumaNoiseReduction)
+            put("colorNoiseReduction", colorNoiseReduction)
+            put("chromaticAberrationRedCyan", chromaticAberrationRedCyan)
+            put("chromaticAberrationBlueYellow", chromaticAberrationBlueYellow)
+            if (includeToneMapper) {
+                put("toneMapper", toneMapper)
+            }
+        }
+    }
+
     fun valueFor(field: AdjustmentField): Float {
         return when (field) {
             AdjustmentField.Brightness -> brightness
@@ -212,32 +254,218 @@ private data class AdjustmentState(
         return copy(toneMapper = mapper)
     }
 
-    fun toJson(): String {
-        val payload = JSONObject().apply {
-            put("brightness", brightness)
-            put("contrast", contrast)
-            put("highlights", highlights)
-            put("shadows", shadows)
-            put("whites", whites)
-            put("blacks", blacks)
-            put("saturation", saturation)
-            put("temperature", temperature)
-            put("tint", tint)
-            put("vibrance", vibrance)
-            put("clarity", clarity)
-            put("dehaze", dehaze)
-            put("structure", structure)
-            put("centre", centre)
-            put("sharpness", sharpness)
-            put("lumaNoiseReduction", lumaNoiseReduction)
-            put("colorNoiseReduction", colorNoiseReduction)
-            put("chromaticAberrationRedCyan", chromaticAberrationRedCyan)
-            put("chromaticAberrationBlueYellow", chromaticAberrationBlueYellow)
-            put("toneMapper", toneMapper)
-            put("masks", JSONArray())
+    fun toJson(masks: List<MaskState> = emptyList()): String {
+        val payload = toJsonObject(includeToneMapper = true).apply {
+            put(
+                "masks",
+                JSONArray().apply {
+                    masks.forEach { put(it.toJsonObject()) }
+                }
+            )
         }
         return payload.toString()
     }
+}
+
+private enum class SubMaskMode {
+    Additive,
+    Subtractive,
+}
+
+private enum class EditorPanelTab {
+    Adjustments,
+    Masks,
+}
+
+private fun AdjustmentState.isNeutralForMask(): Boolean {
+    fun nearZero(v: Float) = kotlin.math.abs(v) <= 0.000001f
+    return nearZero(brightness) &&
+        nearZero(contrast) &&
+        nearZero(highlights) &&
+        nearZero(shadows) &&
+        nearZero(whites) &&
+        nearZero(blacks) &&
+        nearZero(saturation) &&
+        nearZero(temperature) &&
+        nearZero(tint) &&
+        nearZero(vibrance) &&
+        nearZero(clarity) &&
+        nearZero(dehaze) &&
+        nearZero(structure) &&
+        nearZero(centre) &&
+        nearZero(sharpness) &&
+        nearZero(lumaNoiseReduction) &&
+        nearZero(colorNoiseReduction) &&
+        nearZero(chromaticAberrationRedCyan) &&
+        nearZero(chromaticAberrationBlueYellow)
+}
+
+private data class MaskPoint(
+    val x: Float,
+    val y: Float
+)
+
+private data class BrushLineState(
+    val tool: String = "brush",
+    val brushSize: Float,
+    val feather: Float = 0.5f,
+    val order: Long = 0L,
+    val points: List<MaskPoint>
+)
+
+private data class SubMaskState(
+    val id: String,
+    val visible: Boolean = true,
+    val mode: SubMaskMode = SubMaskMode.Additive,
+    val lines: List<BrushLineState> = emptyList()
+)
+
+private data class MaskState(
+    val id: String,
+    val name: String,
+    val visible: Boolean = true,
+    val invert: Boolean = false,
+    val opacity: Float = 100f,
+    val adjustments: AdjustmentState = AdjustmentState(),
+    val subMasks: List<SubMaskState> = emptyList()
+) {
+    fun toJsonObject(): JSONObject {
+        return JSONObject().apply {
+            put("id", id)
+            put("name", name)
+            put("visible", visible)
+            put("invert", invert)
+            put("opacity", opacity)
+            put("adjustments", adjustments.toJsonObject(includeToneMapper = false))
+            put(
+                "subMasks",
+                JSONArray().apply {
+                    subMasks.forEach { put(it.toJsonObject()) }
+                }
+            )
+        }
+    }
+}
+
+private fun SubMaskState.toJsonObject(): JSONObject {
+    return JSONObject().apply {
+        put("id", id)
+        put("type", "brush")
+        put("visible", visible)
+        put("mode", mode.name.lowercase(Locale.US))
+        put(
+            "parameters",
+            JSONObject().apply {
+                put(
+                    "lines",
+                    JSONArray().apply {
+                        lines.forEach { line ->
+                            put(
+                                JSONObject().apply {
+                                    put("tool", line.tool)
+                                    put("brushSize", line.brushSize)
+                                    put("feather", line.feather)
+                                    put("order", line.order)
+                                    put(
+                                        "points",
+                                        JSONArray().apply {
+                                            line.points.forEach { point ->
+                                                put(JSONObject().apply {
+                                                    put("x", point.x)
+                                                    put("y", point.y)
+                                                })
+                                            }
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+                )
+            }
+        )
+    }
+}
+
+private data class BrushEvent(
+    val order: Long,
+    val mode: SubMaskMode,
+    val brushSize: Float,
+    val points: List<MaskPoint>
+)
+
+private fun buildMaskOverlayBitmap(mask: MaskState, targetWidth: Int, targetHeight: Int): Bitmap {
+    val width = targetWidth.coerceAtLeast(1)
+    val height = targetHeight.coerceAtLeast(1)
+    val baseDim = minOf(width, height).toFloat()
+
+    fun denorm(value: Float, max: Int): Float {
+        val maxCoord = (max - 1).coerceAtLeast(1).toFloat()
+        return if (value <= 1.5f) (value * maxCoord).coerceIn(0f, maxCoord) else value
+    }
+
+    val events = buildList {
+        mask.subMasks.forEach { sub ->
+            if (!sub.visible) return@forEach
+            sub.lines.forEach { line ->
+                val effectiveMode =
+                    if (line.tool == "eraser") SubMaskMode.Subtractive else sub.mode
+                add(
+                    BrushEvent(
+                        order = line.order,
+                        mode = effectiveMode,
+                        brushSize = line.brushSize,
+                        points = line.points
+                    )
+                )
+            }
+        }
+    }.sortedBy { it.order }
+
+    val overlay = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(overlay)
+    canvas.drawColor(android.graphics.Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+
+    val addPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(140, 255, 23, 68) // red overlay
+        style = android.graphics.Paint.Style.STROKE
+        strokeCap = android.graphics.Paint.Cap.ROUND
+        strokeJoin = android.graphics.Paint.Join.ROUND
+    }
+    val subPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+        style = android.graphics.Paint.Style.STROKE
+        strokeCap = android.graphics.Paint.Cap.ROUND
+        strokeJoin = android.graphics.Paint.Join.ROUND
+    }
+
+    fun brushPx(brushSizeRaw: Float): Float {
+        return if (brushSizeRaw <= 1.5f) (brushSizeRaw * baseDim).coerceAtLeast(1f) else brushSizeRaw
+    }
+
+    events.forEach { event ->
+        val paint = if (event.mode == SubMaskMode.Additive) addPaint else subPaint
+        paint.strokeWidth = brushPx(event.brushSize)
+
+        if (event.points.isEmpty()) return@forEach
+        if (event.points.size == 1) {
+            val p = event.points[0]
+            val x = denorm(p.x, width)
+            val y = denorm(p.y, height)
+            canvas.drawCircle(x, y, paint.strokeWidth / 2f, paint)
+            return@forEach
+        }
+
+        val path = android.graphics.Path()
+        val first = event.points.first()
+        path.moveTo(denorm(first.x, width), denorm(first.y, height))
+        event.points.drop(1).forEach { p ->
+            path.lineTo(denorm(p.x, width), denorm(p.y, height))
+        }
+        canvas.drawPath(path, paint)
+    }
+
+    return overlay
 }
 
 private data class AdjustmentControl(
@@ -245,12 +473,13 @@ private data class AdjustmentControl(
     val label: String,
     val range: ClosedFloatingPointRange<Float>,
     val step: Float,
+    val defaultValue: Float = 0f,
     val formatter: (Float) -> String = { value -> String.format(Locale.US, "%.0f", value) }
 )
 
 private data class RenderRequest(
     val version: Long,
-    val adjustments: AdjustmentState
+    val adjustmentsJson: String
 )
 
 private val basicSection = listOf(
@@ -259,6 +488,7 @@ private val basicSection = listOf(
         label = "Brightness",
         range = -5f..5f,
         step = 0.01f,
+        defaultValue = 0f,
         formatter = { value -> String.format(Locale.US, "%.2f", value) }
     ),
     AdjustmentControl(field = AdjustmentField.Contrast, label = "Contrast", range = -100f..100f, step = 1f),
@@ -281,15 +511,16 @@ private val detailsSection = listOf(
     AdjustmentControl(field = AdjustmentField.Structure, label = "Structure", range = -100f..100f, step = 1f),
     AdjustmentControl(field = AdjustmentField.Centre, label = "Centré", range = -100f..100f, step = 1f),
     AdjustmentControl(field = AdjustmentField.Sharpness, label = "Sharpness", range = -100f..100f, step = 1f),
-    AdjustmentControl(field = AdjustmentField.LumaNoiseReduction, label = "Luminance NR", range = 0f..100f, step = 1f),
-    AdjustmentControl(field = AdjustmentField.ColorNoiseReduction, label = "Color NR", range = 0f..100f, step = 1f),
+    AdjustmentControl(field = AdjustmentField.LumaNoiseReduction, label = "Luminance NR", range = 0f..100f, step = 1f, defaultValue = 0f),
+    AdjustmentControl(field = AdjustmentField.ColorNoiseReduction, label = "Color NR", range = 0f..100f, step = 1f, defaultValue = 0f),
     AdjustmentControl(field = AdjustmentField.ChromaticAberrationRedCyan, label = "CA Red/Cyan", range = -100f..100f, step = 1f),
     AdjustmentControl(field = AdjustmentField.ChromaticAberrationBlueYellow, label = "CA Blue/Yellow", range = -100f..100f, step = 1f)
 )
 
 private val adjustmentSections = listOf(
     "Basic" to basicSection,
-    "Color" to colorSection
+    "Color" to colorSection,
+    "Details" to detailsSection
 )
 
 class MainActivity : ComponentActivity() {
@@ -535,11 +766,20 @@ private fun EditorScreen(
 
     var rawBytes by remember { mutableStateOf<ByteArray?>(null) }
     var adjustments by remember { mutableStateOf(AdjustmentState()) }
+    var masks by remember { mutableStateOf<List<MaskState>>(emptyList()) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(false) }
     var isExporting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
+
+    var panelTab by remember { mutableStateOf(EditorPanelTab.Adjustments) }
+    var selectedMaskId by remember { mutableStateOf<String?>(null) }
+    var selectedSubMaskId by remember { mutableStateOf<String?>(null) }
+    var isPaintingMask by remember { mutableStateOf(false) }
+    var brushSize by remember { mutableStateOf(60f) }
+    var showMaskOverlay by remember { mutableStateOf(true) }
+    val strokeOrder = remember { AtomicLong(0L) }
 
     val renderVersion = remember { AtomicLong(0L) }
     val lastPreviewVersion = remember { AtomicLong(0L) }
@@ -583,19 +823,104 @@ private fun EditorScreen(
                     chromaticAberrationBlueYellow = json.optDouble("chromaticAberrationBlueYellow", 0.0).toFloat(),
                     toneMapper = json.optString("toneMapper", "basic")
                 )
+
+                val masksArr = json.optJSONArray("masks") ?: JSONArray()
+                val parsedMasks = (0 until masksArr.length()).mapNotNull { idx ->
+                    val maskObj = masksArr.optJSONObject(idx) ?: return@mapNotNull null
+                    val maskId = maskObj.optString("id").takeIf { it.isNotBlank() }
+                        ?: java.util.UUID.randomUUID().toString()
+                    val maskAdjustmentsObj = maskObj.optJSONObject("adjustments") ?: JSONObject()
+                    val maskAdjustments = AdjustmentState(
+                        brightness = maskAdjustmentsObj.optDouble("brightness", 0.0).toFloat(),
+                        contrast = maskAdjustmentsObj.optDouble("contrast", 0.0).toFloat(),
+                        highlights = maskAdjustmentsObj.optDouble("highlights", 0.0).toFloat(),
+                        shadows = maskAdjustmentsObj.optDouble("shadows", 0.0).toFloat(),
+                        whites = maskAdjustmentsObj.optDouble("whites", 0.0).toFloat(),
+                        blacks = maskAdjustmentsObj.optDouble("blacks", 0.0).toFloat(),
+                        saturation = maskAdjustmentsObj.optDouble("saturation", 0.0).toFloat(),
+                        temperature = maskAdjustmentsObj.optDouble("temperature", 0.0).toFloat(),
+                        tint = maskAdjustmentsObj.optDouble("tint", 0.0).toFloat(),
+                        vibrance = maskAdjustmentsObj.optDouble("vibrance", 0.0).toFloat(),
+                        clarity = maskAdjustmentsObj.optDouble("clarity", 0.0).toFloat(),
+                        dehaze = maskAdjustmentsObj.optDouble("dehaze", 0.0).toFloat(),
+                        structure = maskAdjustmentsObj.optDouble("structure", 0.0).toFloat(),
+                        centre = maskAdjustmentsObj.optDouble("centre", 0.0).toFloat(),
+                        sharpness = maskAdjustmentsObj.optDouble("sharpness", 0.0).toFloat(),
+                        lumaNoiseReduction = maskAdjustmentsObj.optDouble("lumaNoiseReduction", 0.0).toFloat(),
+                        colorNoiseReduction = maskAdjustmentsObj.optDouble("colorNoiseReduction", 0.0).toFloat(),
+                        chromaticAberrationRedCyan = maskAdjustmentsObj.optDouble("chromaticAberrationRedCyan", 0.0).toFloat(),
+                        chromaticAberrationBlueYellow = maskAdjustmentsObj.optDouble("chromaticAberrationBlueYellow", 0.0).toFloat(),
+                        toneMapper = adjustments.toneMapper
+                    )
+
+                    val subMasksArr = maskObj.optJSONArray("subMasks") ?: JSONArray()
+                    val subMasks = (0 until subMasksArr.length()).mapNotNull { sIdx ->
+                        val subObj = subMasksArr.optJSONObject(sIdx) ?: return@mapNotNull null
+                        val subId = subObj.optString("id").takeIf { it.isNotBlank() }
+                            ?: java.util.UUID.randomUUID().toString()
+                        val modeStr = subObj.optString("mode", "additive").lowercase(Locale.US)
+                        val mode = if (modeStr == "subtractive") SubMaskMode.Subtractive else SubMaskMode.Additive
+                        val paramsObj = subObj.optJSONObject("parameters") ?: JSONObject()
+                        val linesArr = paramsObj.optJSONArray("lines") ?: JSONArray()
+                        val lines = (0 until linesArr.length()).mapNotNull { lIdx ->
+                            val lineObj = linesArr.optJSONObject(lIdx) ?: return@mapNotNull null
+                            val pointsArr = lineObj.optJSONArray("points") ?: JSONArray()
+                            val points = (0 until pointsArr.length()).mapNotNull { pIdx ->
+                                val pObj = pointsArr.optJSONObject(pIdx) ?: return@mapNotNull null
+                                MaskPoint(
+                                    x = pObj.optDouble("x", 0.0).toFloat(),
+                                    y = pObj.optDouble("y", 0.0).toFloat()
+                                )
+                            }
+                            BrushLineState(
+                                tool = lineObj.optString("tool", "brush"),
+                                brushSize = lineObj.optDouble("brushSize", 50.0).toFloat(),
+                                feather = lineObj.optDouble("feather", 0.5).toFloat(),
+                                order = lineObj.optLong("order", 0L),
+                                points = points
+                            )
+                        }
+                        SubMaskState(
+                            id = subId,
+                            visible = subObj.optBoolean("visible", true),
+                            mode = mode,
+                            lines = lines
+                        )
+                    }
+
+                    MaskState(
+                        id = maskId,
+                        name = maskObj.optString("name", "Mask"),
+                        visible = maskObj.optBoolean("visible", true),
+                        invert = maskObj.optBoolean("invert", false),
+                        opacity = maskObj.optDouble("opacity", 100.0).toFloat(),
+                        adjustments = maskAdjustments,
+                        subMasks = subMasks
+                    )
+                }
+                val maxOrder = parsedMasks
+                    .flatMap { it.subMasks }
+                    .flatMap { it.lines }
+                    .maxOfOrNull { it.order } ?: 0L
+                strokeOrder.set(maxOf(strokeOrder.get(), maxOrder))
+                masks = parsedMasks
+                if (selectedMaskId == null && parsedMasks.isNotEmpty()) {
+                    selectedMaskId = parsedMasks.first().id
+                    selectedSubMaskId = parsedMasks.first().subMasks.firstOrNull()?.id
+                }
             } catch (e: Exception) {
                 // Keep default adjustments if parsing fails
             }
         }
     }
 
-    LaunchedEffect(adjustments) {
+    LaunchedEffect(adjustments, masks) {
+        val json = withContext(Dispatchers.Default) { adjustments.toJson(masks) }
         val version = renderVersion.incrementAndGet()
-        renderRequests.trySend(RenderRequest(version = version, adjustments = adjustments))
+        renderRequests.trySend(RenderRequest(version = version, adjustmentsJson = json))
 
-        // Debounce persisting adjustments (I/O) for slider drags.
+        // Debounce persisting adjustments (I/O) for slider drags + mask edits.
         delay(350)
-        val json = withContext(Dispatchers.Default) { adjustments.toJson() }
         withContext(Dispatchers.IO) {
             storage.saveAdjustments(galleryItem.projectId, json)
         }
@@ -608,7 +933,7 @@ private fun EditorScreen(
         renderRequests.trySend(
             RenderRequest(
                 version = renderVersion.incrementAndGet(),
-                adjustments = adjustments
+                adjustmentsJson = adjustments.toJson(masks)
             )
         )
 
@@ -620,7 +945,7 @@ private fun EditorScreen(
             }
 
             val requestVersion = currentRequest.version
-            val requestJson = withContext(renderDispatcher) { currentRequest.adjustments.toJson() }
+            val requestJson = currentRequest.adjustmentsJson
 
             // Stage 1: super-low quality (fast feedback while dragging).
             val superLowBitmap = withContext(renderDispatcher) {
@@ -696,6 +1021,32 @@ private fun EditorScreen(
         }
     }
 
+    val selectedMaskForOverlay = masks.firstOrNull { it.id == selectedMaskId }
+    val isMaskMode = panelTab == EditorPanelTab.Masks
+    val isPaintingEnabled = isMaskMode && isPaintingMask && selectedMaskId != null && selectedSubMaskId != null
+
+    val onBrushStrokeFinished: (List<MaskPoint>, Float) -> Unit = onBrush@{ points, brushSizeNorm ->
+        val maskId = selectedMaskId ?: return@onBrush
+        val subId = selectedSubMaskId ?: return@onBrush
+        if (points.isEmpty()) return@onBrush
+        val newLine = BrushLineState(
+            tool = "brush",
+            brushSize = brushSizeNorm,
+            feather = 0.5f,
+            order = strokeOrder.incrementAndGet(),
+            points = points
+        )
+        masks = masks.map { mask ->
+            if (mask.id != maskId) return@map mask
+            mask.copy(
+                subMasks = mask.subMasks.map { sub ->
+                    if (sub.id != subId) sub else sub.copy(lines = sub.lines + newLine)
+                }
+            )
+        }
+        showMaskOverlay = true
+    }
+
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (isTablet) {
@@ -710,7 +1061,16 @@ private fun EditorScreen(
                                 .weight(3f)
                                 .fillMaxHeight()
                         ) {
-                            ImagePreview(bitmap = previewBitmap, isLoading = isLoading)
+                            ImagePreview(
+                                bitmap = previewBitmap,
+                                isLoading = isLoading,
+                                maskOverlay = selectedMaskForOverlay,
+                                isMaskMode = isMaskMode,
+                                showMaskOverlay = showMaskOverlay,
+                                isPainting = isPaintingEnabled,
+                                brushSize = brushSize,
+                                onBrushStrokeFinished = onBrushStrokeFinished
+                            )
                         }
 
                         // Right column: Controls (with top padding for status bar + app bar)
@@ -730,36 +1090,24 @@ private fun EditorScreen(
                                     .padding(horizontal = 16.dp, vertical = 16.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                ToneMapperSection(
-                                toneMapper = adjustments.toneMapper,
-                                onToneMapperChange = { mapper ->
-                                    adjustments = adjustments.withToneMapper(mapper)
-                                }
-                            )
-
-                            adjustmentSections.forEach { (sectionTitle, controls) ->
-                                Text(
-                                    text = sectionTitle,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    modifier = Modifier.padding(top = 8.dp),
-                                    color = MaterialTheme.colorScheme.onSurface
+                                TabbedEditorControls(
+                                    panelTab = panelTab,
+                                    onPanelTabChange = { panelTab = it },
+                                    adjustments = adjustments,
+                                    onAdjustmentsChange = { adjustments = it },
+                                    masks = masks,
+                                    onMasksChange = { masks = it },
+                                    selectedMaskId = selectedMaskId,
+                                    onSelectedMaskIdChange = { selectedMaskId = it },
+                                    selectedSubMaskId = selectedSubMaskId,
+                                    onSelectedSubMaskIdChange = { selectedSubMaskId = it },
+                                    isPaintingMask = isPaintingMask,
+                                    onPaintingMaskChange = { isPaintingMask = it },
+                                    showMaskOverlay = showMaskOverlay,
+                                    onShowMaskOverlayChange = { showMaskOverlay = it },
+                                    brushSize = brushSize,
+                                    onBrushSizeChange = { brushSize = it }
                                 )
-                                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    controls.forEach { control ->
-                                        val currentValue = adjustments.valueFor(control.field)
-                                        AdjustmentSlider(
-                                            label = control.label,
-                                            value = currentValue,
-                                            range = control.range,
-                                            step = control.step,
-                                            formatter = control.formatter,
-                                            onValueChange = { snapped ->
-                                                adjustments = adjustments.withValue(control.field, snapped)
-                                            }
-                                        )
-                                    }
-                                }
-                            }
                             
                             Spacer(modifier = Modifier.height(16.dp))
                             
@@ -767,6 +1115,7 @@ private fun EditorScreen(
                             ExportButton(
                                 rawBytes = rawBytes,
                                 adjustments = adjustments,
+                                masks = masks,
                                 isExporting = isExporting,
                                 nativeDispatcher = renderDispatcher,
                                 context = context,
@@ -886,7 +1235,16 @@ private fun EditorScreen(
                             .fillMaxWidth()
                             .weight(1f)
                     ) {
-                        ImagePreview(bitmap = previewBitmap, isLoading = isLoading)
+                        ImagePreview(
+                            bitmap = previewBitmap,
+                            isLoading = isLoading,
+                            maskOverlay = selectedMaskForOverlay,
+                            isMaskMode = isMaskMode,
+                            showMaskOverlay = showMaskOverlay,
+                            isPainting = isPaintingEnabled,
+                            brushSize = brushSize,
+                            onBrushStrokeFinished = onBrushStrokeFinished
+                        )
                     }
 
                     // Fixed-height scrollable controls panel at bottom
@@ -910,13 +1268,14 @@ private fun EditorScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                ExportButton(
-                                    rawBytes = rawBytes,
-                                    adjustments = adjustments,
-                                    isExporting = isExporting,
-                                    nativeDispatcher = renderDispatcher,
-                                    context = context,
-                                    onExportStart = { isExporting = true },
+                                    ExportButton(
+                                        rawBytes = rawBytes,
+                                        adjustments = adjustments,
+                                        masks = masks,
+                                        isExporting = isExporting,
+                                        nativeDispatcher = renderDispatcher,
+                                        context = context,
+                                        onExportStart = { isExporting = true },
                                     onExportComplete = { success, message ->
                                         isExporting = false
                                         if (success) {
@@ -946,37 +1305,24 @@ private fun EditorScreen(
                                 )
                             }
 
-                            // Tone Mapper Section
-                            ToneMapperSection(
-                                toneMapper = adjustments.toneMapper,
-                                onToneMapperChange = { mapper ->
-                                    adjustments = adjustments.withToneMapper(mapper)
-                                }
+                            TabbedEditorControls(
+                                panelTab = panelTab,
+                                onPanelTabChange = { panelTab = it },
+                                adjustments = adjustments,
+                                onAdjustmentsChange = { adjustments = it },
+                                masks = masks,
+                                onMasksChange = { masks = it },
+                                selectedMaskId = selectedMaskId,
+                                onSelectedMaskIdChange = { selectedMaskId = it },
+                                selectedSubMaskId = selectedSubMaskId,
+                                onSelectedSubMaskIdChange = { selectedSubMaskId = it },
+                                isPaintingMask = isPaintingMask,
+                                onPaintingMaskChange = { isPaintingMask = it },
+                                showMaskOverlay = showMaskOverlay,
+                                onShowMaskOverlayChange = { showMaskOverlay = it },
+                                brushSize = brushSize,
+                                onBrushSizeChange = { brushSize = it }
                             )
-
-                            adjustmentSections.forEach { (sectionTitle, controls) ->
-                                Text(
-                                    text = sectionTitle,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    modifier = Modifier.padding(top = 8.dp),
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    controls.forEach { control ->
-                                        val currentValue = adjustments.valueFor(control.field)
-                                        AdjustmentSlider(
-                                            label = control.label,
-                                            value = currentValue,
-                                            range = control.range,
-                                            step = control.step,
-                                            formatter = control.formatter,
-                                            onValueChange = { snapped ->
-                                                adjustments = adjustments.withValue(control.field, snapped)
-                                            }
-                                        )
-                                    }
-                                }
-                            }
                             Spacer(modifier = Modifier.height(20.dp))
                         }
                     }
@@ -999,6 +1345,7 @@ private fun EditorScreen(
 private fun ExportButton(
     rawBytes: ByteArray?,
     adjustments: AdjustmentState,
+    masks: List<MaskState>,
     isExporting: Boolean,
     nativeDispatcher: CoroutineDispatcher,
     context: Context,
@@ -1012,9 +1359,10 @@ private fun ExportButton(
             val raw = rawBytes
             if (isExporting || raw == null) return@Button
             val currentAdjustments = adjustments
+            val currentMasks = masks
             onExportStart()
             coroutineScope.launch {
-                val currentJson = withContext(Dispatchers.Default) { currentAdjustments.toJson() }
+                val currentJson = withContext(Dispatchers.Default) { currentAdjustments.toJson(currentMasks) }
                 val fullBytes = withContext(nativeDispatcher) {
                     runCatching { LibRawDecoder.decodeFullRes(raw, currentJson) }.getOrNull()
                 }
@@ -1044,6 +1392,398 @@ private fun ExportButton(
             Spacer(modifier = Modifier.width(6.dp))
         }
         Text("Export JPEG")
+    }
+}
+
+@Composable
+private fun TabbedEditorControls(
+    panelTab: EditorPanelTab,
+    onPanelTabChange: (EditorPanelTab) -> Unit,
+    adjustments: AdjustmentState,
+    onAdjustmentsChange: (AdjustmentState) -> Unit,
+    masks: List<MaskState>,
+    onMasksChange: (List<MaskState>) -> Unit,
+    selectedMaskId: String?,
+    onSelectedMaskIdChange: (String?) -> Unit,
+    selectedSubMaskId: String?,
+    onSelectedSubMaskIdChange: (String?) -> Unit,
+    isPaintingMask: Boolean,
+    onPaintingMaskChange: (Boolean) -> Unit,
+    showMaskOverlay: Boolean,
+    onShowMaskOverlayChange: (Boolean) -> Unit,
+    brushSize: Float,
+    onBrushSizeChange: (Float) -> Unit
+) {
+    TabRow(selectedTabIndex = if (panelTab == EditorPanelTab.Adjustments) 0 else 1) {
+        Tab(
+            selected = panelTab == EditorPanelTab.Adjustments,
+            onClick = {
+                onPaintingMaskChange(false)
+                onPanelTabChange(EditorPanelTab.Adjustments)
+            },
+            text = { Text("Adjust") }
+        )
+        Tab(
+            selected = panelTab == EditorPanelTab.Masks,
+            onClick = {
+                onShowMaskOverlayChange(true)
+                onPanelTabChange(EditorPanelTab.Masks)
+            },
+            text = { Text("Mask") }
+        )
+    }
+
+    when (panelTab) {
+        EditorPanelTab.Adjustments -> {
+            ToneMapperSection(
+                toneMapper = adjustments.toneMapper,
+                onToneMapperChange = { mapper -> onAdjustmentsChange(adjustments.withToneMapper(mapper)) }
+            )
+
+            adjustmentSections.forEach { (sectionTitle, controls) ->
+                Text(
+                    text = sectionTitle,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    controls.forEach { control ->
+                        val currentValue = adjustments.valueFor(control.field)
+                        AdjustmentSlider(
+                            label = control.label,
+                            value = currentValue,
+                            range = control.range,
+                            step = control.step,
+                            defaultValue = control.defaultValue,
+                            formatter = control.formatter,
+                            onValueChange = { snapped ->
+                                onAdjustmentsChange(adjustments.withValue(control.field, snapped))
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        EditorPanelTab.Masks -> {
+            val selectedMask = masks.firstOrNull { it.id == selectedMaskId }
+            val selectedSubMask = selectedMask?.subMasks?.firstOrNull { it.id == selectedSubMaskId }
+
+            FilledTonalButton(
+                onClick = {
+                    val newMaskId = java.util.UUID.randomUUID().toString()
+                    val newSubId = java.util.UUID.randomUUID().toString()
+                    val newMask = MaskState(
+                        id = newMaskId,
+                        name = "Mask ${masks.size + 1}",
+                        subMasks = listOf(SubMaskState(id = newSubId, mode = SubMaskMode.Additive))
+                    )
+                    onMasksChange(masks + newMask)
+                    onSelectedMaskIdChange(newMaskId)
+                    onSelectedSubMaskIdChange(newSubId)
+                    onPaintingMaskChange(true)
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Add Brush Mask")
+            }
+
+            if (masks.isEmpty()) {
+                Text(
+                    text = "Create a mask to start painting.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                return
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                masks.forEachIndexed { index, mask ->
+                    val isSelected = mask.id == selectedMaskId
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isSelected)
+                                MaterialTheme.colorScheme.secondaryContainer
+                            else
+                                MaterialTheme.colorScheme.surfaceContainerHigh
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = mask.visible,
+                                onCheckedChange = { checked ->
+                                    onMasksChange(
+                                        masks.map { m -> if (m.id == mask.id) m.copy(visible = checked) else m }
+                                    )
+                                }
+                            )
+                            Text(
+                                text = mask.name,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        onPaintingMaskChange(false)
+                                        onShowMaskOverlayChange(mask.adjustments.isNeutralForMask())
+                                        onSelectedMaskIdChange(mask.id)
+                                        onSelectedSubMaskIdChange(mask.subMasks.firstOrNull()?.id)
+                                    },
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                            IconButton(
+                                onClick = {
+                                    if (index <= 0) return@IconButton
+                                    val reordered = masks.toMutableList()
+                                    val tmp = reordered[index - 1]
+                                    reordered[index - 1] = reordered[index]
+                                    reordered[index] = tmp
+                                    onMasksChange(reordered.toList())
+                                }
+                            ) { Text("↑") }
+                            IconButton(
+                                onClick = {
+                                    if (index >= masks.lastIndex) return@IconButton
+                                    val reordered = masks.toMutableList()
+                                    val tmp = reordered[index + 1]
+                                    reordered[index + 1] = reordered[index]
+                                    reordered[index] = tmp
+                                    onMasksChange(reordered.toList())
+                                }
+                            ) { Text("↓") }
+                            IconButton(
+                                onClick = {
+                                    val remaining = masks.filterNot { it.id == mask.id }
+                                    onMasksChange(remaining)
+                                    if (selectedMaskId == mask.id) {
+                                        onPaintingMaskChange(false)
+                                        onSelectedMaskIdChange(remaining.firstOrNull()?.id)
+                                        onSelectedSubMaskIdChange(remaining.firstOrNull()?.subMasks?.firstOrNull()?.id)
+                                    }
+                                }
+                            ) { Text("✕") }
+                        }
+                    }
+                }
+            }
+
+            if (selectedMask == null) return
+
+            Text(
+                text = "Mask Settings",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Invert", color = MaterialTheme.colorScheme.onSurface)
+                Checkbox(
+                    checked = selectedMask.invert,
+                    onCheckedChange = { checked ->
+                        onMasksChange(
+                            masks.map { m -> if (m.id == selectedMask.id) m.copy(invert = checked) else m }
+                        )
+                    }
+                )
+            }
+
+            Text("Opacity: ${selectedMask.opacity.roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
+            Slider(
+                value = selectedMask.opacity.coerceIn(0f, 100f),
+                onValueChange = { newValue ->
+                    onMasksChange(
+                        masks.map { m -> if (m.id == selectedMask.id) m.copy(opacity = newValue) else m }
+                    )
+                },
+                valueRange = 0f..100f
+            )
+
+            Text(
+                text = "Submasks",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = {
+                        val newSubId = java.util.UUID.randomUUID().toString()
+                        val updated = masks.map { m ->
+                            if (m.id != selectedMask.id) m
+                            else m.copy(subMasks = m.subMasks + SubMaskState(id = newSubId, mode = SubMaskMode.Additive))
+                        }
+                        onMasksChange(updated)
+                        onSelectedSubMaskIdChange(newSubId)
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Add +") }
+                FilledTonalButton(
+                    onClick = {
+                        val newSubId = java.util.UUID.randomUUID().toString()
+                        val updated = masks.map { m ->
+                            if (m.id != selectedMask.id) m
+                            else m.copy(subMasks = m.subMasks + SubMaskState(id = newSubId, mode = SubMaskMode.Subtractive))
+                        }
+                        onMasksChange(updated)
+                        onSelectedSubMaskIdChange(newSubId)
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Subtract -") }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                selectedMask.subMasks.forEach { sub ->
+                    val isSelected = sub.id == selectedSubMaskId
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isSelected)
+                                MaterialTheme.colorScheme.tertiaryContainer
+                            else
+                                MaterialTheme.colorScheme.surfaceContainerHigh
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = sub.visible,
+                                onCheckedChange = { checked ->
+                                    val updated = masks.map { m ->
+                                        if (m.id != selectedMask.id) m
+                                        else m.copy(
+                                            subMasks = m.subMasks.map { s -> if (s.id == sub.id) s.copy(visible = checked) else s }
+                                        )
+                                    }
+                                    onMasksChange(updated)
+                                }
+                            )
+                            Text(
+                                text = if (sub.mode == SubMaskMode.Additive) "Add" else "Subtract",
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { onSelectedSubMaskIdChange(sub.id) },
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                            IconButton(
+                                onClick = {
+                                    val updated = masks.map { m ->
+                                        if (m.id != selectedMask.id) m
+                                        else m.copy(subMasks = m.subMasks.filterNot { it.id == sub.id })
+                                    }
+                                    onMasksChange(updated)
+                                    if (selectedSubMaskId == sub.id) {
+                                        onPaintingMaskChange(false)
+                                        onSelectedSubMaskIdChange(updated.firstOrNull { it.id == selectedMask.id }?.subMasks?.firstOrNull()?.id)
+                                    }
+                                }
+                            ) { Text("✕") }
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Paint", color = MaterialTheme.colorScheme.onSurface)
+                Checkbox(
+                    checked = isPaintingMask,
+                    onCheckedChange = { checked ->
+                        onPaintingMaskChange(checked)
+                        if (checked) onShowMaskOverlayChange(true)
+                    }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Show Overlay", color = MaterialTheme.colorScheme.onSurface)
+                Checkbox(
+                    checked = showMaskOverlay,
+                    onCheckedChange = { checked -> onShowMaskOverlayChange(checked) },
+                    enabled = selectedMask.adjustments.isNeutralForMask()
+                )
+            }
+
+            if (selectedSubMask == null) {
+                Text(
+                    text = "Select a submask to paint.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                return
+            }
+
+            Text("Brush Size: ${brushSize.roundToInt()} px", color = MaterialTheme.colorScheme.onSurface)
+            Slider(
+                value = brushSize.coerceIn(2f, 400f),
+                onValueChange = { onBrushSizeChange(it) },
+                valueRange = 2f..400f
+            )
+
+            Text(
+                text = "Mask Adjustments",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            adjustmentSections.forEach { (sectionTitle, controls) ->
+                Text(
+                    text = sectionTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = 8.dp),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    controls.forEach { control ->
+                        val currentValue = selectedMask.adjustments.valueFor(control.field)
+                        AdjustmentSlider(
+                            label = control.label,
+                            value = currentValue,
+                            range = control.range,
+                            step = control.step,
+                            defaultValue = control.defaultValue,
+                            formatter = control.formatter,
+                            onValueChange = { snapped ->
+                                val updated = masks.map { m ->
+                                    if (m.id != selectedMask.id) m
+                                    else m.copy(adjustments = m.adjustments.withValue(control.field, snapped))
+                                }
+                                onMasksChange(updated)
+                                val newMask = updated.firstOrNull { it.id == selectedMask.id }
+                                onShowMaskOverlayChange(newMask?.adjustments?.isNeutralForMask() == true)
+                            }
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1119,6 +1859,7 @@ private fun AdjustmentSlider(
     value: Float,
     range: ClosedFloatingPointRange<Float>,
     step: Float,
+    defaultValue: Float,
     formatter: (Float) -> String,
     onValueChange: (Float) -> Unit
 ) {
@@ -1129,7 +1870,11 @@ private fun AdjustmentSlider(
     )
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .pointerInput(label, defaultValue) {
+                    detectTapGestures(onDoubleTap = { onValueChange(defaultValue) })
+                },
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1168,38 +1913,163 @@ private fun snapToStep(
 }
 
 @Composable
-private fun ImagePreview(bitmap: Bitmap?, isLoading: Boolean) {
+private fun ImagePreview(
+    bitmap: Bitmap?,
+    isLoading: Boolean,
+    maskOverlay: MaskState? = null,
+    isMaskMode: Boolean = false,
+    showMaskOverlay: Boolean = true,
+    isPainting: Boolean = false,
+    brushSize: Float = 60f,
+    onBrushStrokeFinished: ((List<MaskPoint>, Float) -> Unit)? = null
+) {
     var scale by remember { mutableStateOf(1f) }
     var offsetX by remember { mutableStateOf(0f) }
     var offsetY by remember { mutableStateOf(0f) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .fillMaxHeight(),
+    val currentStroke = remember { mutableStateListOf<MaskPoint>() }
+    val density = LocalDensity.current
+
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
+        val containerW = with(density) { maxWidth.toPx() }
+        val containerH = with(density) { maxHeight.toPx() }
+
         if (bitmap != null) {
+            val bmpW = bitmap.width.toFloat().coerceAtLeast(1f)
+            val bmpH = bitmap.height.toFloat().coerceAtLeast(1f)
+            val baseScale = minOf(containerW / bmpW, containerH / bmpH)
+            val displayW = bmpW * baseScale
+            val displayH = bmpH * baseScale
+            val left = (containerW - displayW) / 2f
+            val top = (containerH - displayH) / 2f
+
+            val baseDim = minOf(bmpW, bmpH)
+
+            fun toImagePoint(pos: Offset): MaskPoint {
+                val nx = ((pos.x - left) / displayW).coerceIn(0f, 1f)
+                val ny = ((pos.y - top) / displayH).coerceIn(0f, 1f)
+                return MaskPoint(x = nx, y = ny)
+            }
+
+            val imageModifier = Modifier
+                .fillMaxSize()
+                .let { base ->
+                    if (isMaskMode) base
+                    else base
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                scale = (scale * zoom).coerceIn(0.5f, 5f)
+                                offsetX += pan.x
+                                offsetY += pan.y
+                            }
+                        }
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offsetX,
+                            translationY = offsetY
+                        )
+                }
+
             Image(
                 bitmap = bitmap.asImageBitmap(),
                 contentDescription = "Processed preview",
                 contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            scale = (scale * zoom).coerceIn(0.5f, 5f)
-                            offsetX += pan.x
-                            offsetY += pan.y
-                        }
-                    }
-                    .graphicsLayer(
-                        scaleX = scale,
-                        scaleY = scale,
-                        translationX = offsetX,
-                        translationY = offsetY
-                    )
+                modifier = imageModifier
             )
+
+            if (isMaskMode) {
+                val overlayBitmap = remember(maskOverlay, showMaskOverlay, bitmap.width, bitmap.height) {
+                    if (!showMaskOverlay || maskOverlay == null || !maskOverlay.adjustments.isNeutralForMask()) {
+                        null
+                    } else {
+                        val maxDim = 768
+                        val w = bitmap.width
+                        val h = bitmap.height
+                        val scale = if (w >= h) maxDim.toFloat() / w.coerceAtLeast(1) else maxDim.toFloat() / h.coerceAtLeast(1)
+                        val outW = (w * scale).toInt().coerceAtLeast(1)
+                        val outH = (h * scale).toInt().coerceAtLeast(1)
+                        buildMaskOverlayBitmap(maskOverlay, outW, outH)
+                    }
+                }
+                if (overlayBitmap != null) {
+                    Image(
+                        bitmap = overlayBitmap.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                if (currentStroke.isNotEmpty()) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val brushSizePx = brushSize * baseScale
+                        val strokeWidth = brushSizePx.coerceAtLeast(1f)
+                        val maxX = (bmpW - 1f).coerceAtLeast(1f)
+                        val maxY = (bmpH - 1f).coerceAtLeast(1f)
+                        fun toDisplayOffset(p: MaskPoint): Offset {
+                            val px = if (p.x <= 1.5f) p.x * maxX else p.x
+                            val py = if (p.y <= 1.5f) p.y * maxY else p.y
+                            return Offset(left + px * baseScale, top + py * baseScale)
+                        }
+                        val path = Path().apply {
+                            val first = currentStroke.firstOrNull()?.let(::toDisplayOffset) ?: return@Canvas
+                            moveTo(first.x, first.y)
+                            currentStroke.drop(1).forEach { p ->
+                                val o = toDisplayOffset(p)
+                                lineTo(o.x, o.y)
+                            }
+                        }
+                        drawPath(
+                            path = path,
+                            color = Color(0x88FFFFFF),
+                            style = Stroke(width = strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                        )
+                    }
+                }
+            }
+
+            if (isMaskMode && isPainting && onBrushStrokeFinished != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(isPainting, brushSize, bitmap) {
+                            detectDragGestures(
+                                onDragStart = { start ->
+                                    currentStroke.clear()
+                                    currentStroke.add(toImagePoint(start))
+                                },
+                                onDrag = { change, _ ->
+                                    change.consume()
+                                    val newPoint = toImagePoint(change.position)
+                                    val last = currentStroke.lastOrNull()
+                                    val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
+                                    val minStep = (brushSizeNorm / 6f).coerceAtLeast(0.003f)
+                                    if (last == null) {
+                                        currentStroke.add(newPoint)
+                                    } else {
+                                        val dx = newPoint.x - last.x
+                                        val dy = newPoint.y - last.y
+                                        if (dx * dx + dy * dy >= minStep * minStep) {
+                                            currentStroke.add(newPoint)
+                                        }
+                                    }
+                                },
+                                onDragEnd = {
+                                    if (currentStroke.isNotEmpty()) {
+                                        val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
+                                        onBrushStrokeFinished(currentStroke.toList(), brushSizeNorm)
+                                    }
+                                    currentStroke.clear()
+                                },
+                                onDragCancel = { currentStroke.clear() }
+                            )
+                        }
+                )
+            }
         } else {
             Text(
                 text = "No preview yet",
@@ -1208,10 +2078,9 @@ private fun ImagePreview(bitmap: Bitmap?, isLoading: Boolean) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+
         if (isLoading) {
-            CircularProgressIndicator(
-                color = MaterialTheme.colorScheme.primary
-            )
+            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
         }
     }
 }
