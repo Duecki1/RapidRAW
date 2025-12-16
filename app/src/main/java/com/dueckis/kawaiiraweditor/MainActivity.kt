@@ -21,6 +21,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -51,11 +53,15 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
@@ -112,6 +118,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.Dp
 import com.dueckis.kawaiiraweditor.ui.theme.KawaiiRawEditorTheme
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -1964,7 +1971,7 @@ private fun TabbedEditorControls(
                 onMaskTapModeChange(MaskTapMode.None)
                 onPanelTabChange(EditorPanelTab.Color)
             },
-            text = { Text("Curves") }
+            text = { Text("Color") }
         )
         Tab(
             selected = panelTab == EditorPanelTab.Masks,
@@ -1985,58 +1992,50 @@ private fun TabbedEditorControls(
             )
 
             adjustmentSections.forEach { (sectionTitle, controls) ->
-                Text(
-                    text = sectionTitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(top = 8.dp),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    controls.forEach { control ->
-                        val currentValue = adjustments.valueFor(control.field)
-                        AdjustmentSlider(
-                            label = control.label,
-                            value = currentValue,
-                            range = control.range,
-                            step = control.step,
-                            defaultValue = control.defaultValue,
-                            formatter = control.formatter,
-                            onValueChange = { snapped ->
-                                onAdjustmentsChange(adjustments.withValue(control.field, snapped))
-                            }
-                        )
+                PanelSectionCard(title = sectionTitle) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        controls.forEach { control ->
+                            val currentValue = adjustments.valueFor(control.field)
+                            AdjustmentSlider(
+                                label = control.label,
+                                value = currentValue,
+                                range = control.range,
+                                step = control.step,
+                                defaultValue = control.defaultValue,
+                                formatter = control.formatter,
+                                onValueChange = { snapped ->
+                                    onAdjustmentsChange(adjustments.withValue(control.field, snapped))
+                                }
+                            )
+                        }
                     }
                 }
             }
         }
 
         EditorPanelTab.Color -> {
-            Text(
-                text = "Curves",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 8.dp),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            CurvesEditor(
-                adjustments = adjustments,
-                histogramData = histogramData,
-                onAdjustmentsChange = onAdjustmentsChange
-            )
+            PanelSectionCard(
+                title = "Curves",
+                subtitle = "Tap to add points • Drag to adjust"
+            ) {
+                CurvesEditor(
+                    adjustments = adjustments,
+                    histogramData = histogramData,
+                    onAdjustmentsChange = onAdjustmentsChange
+                )
+            }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Text(
-                text = "Color Grading",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 8.dp),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            ColorGradingEditor(
-                colorGrading = adjustments.colorGrading,
-                onColorGradingChange = { updated ->
-                    onAdjustmentsChange(adjustments.copy(colorGrading = updated))
-                }
-            )
+            PanelSectionCard(
+                title = "Color Grading",
+                subtitle = "Shadows / Midtones / Highlights"
+            ) {
+                ColorGradingEditor(
+                    colorGrading = adjustments.colorGrading,
+                    onColorGradingChange = { updated ->
+                        onAdjustmentsChange(adjustments.copy(colorGrading = updated))
+                    }
+                )
+            }
         }
 
         EditorPanelTab.Masks -> {
@@ -2142,8 +2141,14 @@ private fun TabbedEditorControls(
                                     reordered[index - 1] = reordered[index]
                                     reordered[index] = tmp
                                     onMasksChange(reordered.toList())
-                                }
-                            ) { Text("↑") }
+                                },
+                                enabled = index > 0
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.KeyboardArrowUp,
+                                    contentDescription = "Move mask up"
+                                )
+                            }
                             IconButton(
                                 onClick = {
                                     if (index >= masks.lastIndex) return@IconButton
@@ -2152,8 +2157,14 @@ private fun TabbedEditorControls(
                                     reordered[index + 1] = reordered[index]
                                     reordered[index] = tmp
                                     onMasksChange(reordered.toList())
-                                }
-                            ) { Text("↓") }
+                                },
+                                enabled = index < masks.lastIndex
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = "Move mask down"
+                                )
+                            }
                             IconButton(
                                 onClick = {
                                     val remaining = masks.filterNot { it.id == mask.id }
@@ -2164,7 +2175,12 @@ private fun TabbedEditorControls(
                                         onSelectedSubMaskIdChange(remaining.firstOrNull()?.subMasks?.firstOrNull()?.id)
                                     }
                                 }
-                            ) { Text("✕") }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Delete,
+                                    contentDescription = "Delete mask"
+                                )
+                            }
                         }
                     }
                 }
@@ -2172,47 +2188,39 @@ private fun TabbedEditorControls(
 
             if (selectedMask == null) return
 
-            Text(
-                text = "Mask Settings",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 8.dp),
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            PanelSectionCard(title = "Mask Settings") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Invert", color = MaterialTheme.colorScheme.onSurface)
+                    Checkbox(
+                        checked = selectedMask.invert,
+                        onCheckedChange = { checked ->
+                            onMasksChange(
+                                masks.map { m -> if (m.id == selectedMask.id) m.copy(invert = checked) else m }
+                            )
+                        }
+                    )
+                }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("Invert", color = MaterialTheme.colorScheme.onSurface)
-                Checkbox(
-                    checked = selectedMask.invert,
-                    onCheckedChange = { checked ->
+                AdjustmentSlider(
+                    label = "Opacity",
+                    value = selectedMask.opacity.coerceIn(0f, 100f),
+                    range = 0f..100f,
+                    step = 1f,
+                    defaultValue = 100f,
+                    formatter = { "${it.roundToInt()}%" },
+                    onValueChange = { newValue ->
                         onMasksChange(
-                            masks.map { m -> if (m.id == selectedMask.id) m.copy(invert = checked) else m }
+                            masks.map { m -> if (m.id == selectedMask.id) m.copy(opacity = newValue) else m }
                         )
                     }
                 )
             }
 
-            Text("Opacity: ${selectedMask.opacity.roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
-            Slider(
-                value = selectedMask.opacity.coerceIn(0f, 100f),
-                onValueChange = { newValue ->
-                    onMasksChange(
-                        masks.map { m -> if (m.id == selectedMask.id) m.copy(opacity = newValue) else m }
-                    )
-                },
-                valueRange = 0f..100f
-            )
-
-            Text(
-                text = "Submasks",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 8.dp),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-
+            PanelSectionCard(title = "Submasks", subtitle = "Brush / gradient / radial") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2343,12 +2351,19 @@ private fun TabbedEditorControls(
                                         onSelectedSubMaskIdChange(updated.firstOrNull { it.id == selectedMask.id }?.subMasks?.firstOrNull()?.id)
                                     }
                                 }
-                            ) { Text("✕") }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Delete,
+                                    contentDescription = "Delete submask"
+                                )
+                            }
                         }
                     }
                 }
             }
+            }
 
+            PanelSectionCard(title = "Tool", subtitle = "Paint / overlay / shape controls") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -2395,9 +2410,7 @@ private fun TabbedEditorControls(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                return
-            }
-
+            } else {
             if (maskTapMode != MaskTapMode.None) {
                 Text(
                     text = when (maskTapMode) {
@@ -2511,41 +2524,38 @@ private fun TabbedEditorControls(
                     )
                 }
             }
+            }
+            }
 
-            Text(
-                text = "Mask Adjustments",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 8.dp),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-
-            adjustmentSections.forEach { (sectionTitle, controls) ->
-                Text(
-                    text = sectionTitle,
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(top = 8.dp),
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    controls.forEach { control ->
-                        val currentValue = selectedMask.adjustments.valueFor(control.field)
-                        AdjustmentSlider(
-                            label = control.label,
-                            value = currentValue,
-                            range = control.range,
-                            step = control.step,
-                            defaultValue = control.defaultValue,
-                            formatter = control.formatter,
-                            onValueChange = { snapped ->
-                                val updated = masks.map { m ->
-                                    if (m.id != selectedMask.id) m
-                                    else m.copy(adjustments = m.adjustments.withValue(control.field, snapped))
+            PanelSectionCard(title = "Mask Adjustments", subtitle = "Edits inside this mask") {
+                adjustmentSections.forEach { (sectionTitle, controls) ->
+                    Text(
+                        text = sectionTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        controls.forEach { control ->
+                            val currentValue = selectedMask.adjustments.valueFor(control.field)
+                            AdjustmentSlider(
+                                label = control.label,
+                                value = currentValue,
+                                range = control.range,
+                                step = control.step,
+                                defaultValue = control.defaultValue,
+                                formatter = control.formatter,
+                                onValueChange = { snapped ->
+                                    val updated = masks.map { m ->
+                                        if (m.id != selectedMask.id) m
+                                        else m.copy(adjustments = m.adjustments.withValue(control.field, snapped))
+                                    }
+                                    onMasksChange(updated)
+                                    val newMask = updated.firstOrNull { it.id == selectedMask.id }
+                                    onShowMaskOverlayChange(newMask?.adjustments?.isNeutralForMask() == true)
                                 }
-                                onMasksChange(updated)
-                                val newMask = updated.firstOrNull { it.id == selectedMask.id }
-                                onShowMaskOverlayChange(newMask?.adjustments?.isNeutralForMask() == true)
-                            }
-                        )
+                            )
+                        }
                     }
                 }
             }
@@ -2788,6 +2798,49 @@ private enum class CurveChannel(val label: String) {
     Blue("B"),
 }
 
+@Composable
+private fun PanelSectionCard(
+    title: String,
+    modifier: Modifier = Modifier,
+    subtitle: String? = null,
+    trailing: (@Composable (() -> Unit))? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        shape = MaterialTheme.shapes.large
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    subtitle?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                trailing?.invoke()
+            }
+            content()
+        }
+    }
+}
+
 private fun CurvesState.pointsFor(channel: CurveChannel): List<CurvePointState> {
     return when (channel) {
         CurveChannel.Luma -> luma
@@ -2834,7 +2887,7 @@ private fun CurvesEditor(
         CurveChannel.Blue -> histogramData?.blue
     }
 
-    val pointHitRadiusPx = with(LocalDensity.current) { 14.dp.toPx() }
+    val pointHitRadiusPx = with(LocalDensity.current) { 28.dp.toPx() }
     val gridColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
     val resetChannel: () -> Unit = {
         val updatedCurves = latestCurves.withPoints(activeChannel, defaultCurvePoints())
@@ -2842,36 +2895,51 @@ private fun CurvesEditor(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             CurveChannel.values().forEach { channel ->
                 val selected = channel == activeChannel
+                val accent = when (channel) {
+                    CurveChannel.Luma -> MaterialTheme.colorScheme.primary
+                    CurveChannel.Red -> Color(0xFFFF6B6B)
+                    CurveChannel.Green -> Color(0xFF6BCB77)
+                    CurveChannel.Blue -> Color(0xFF4D96FF)
+                }
                 FilledTonalButton(
                     onClick = { activeChannel = channel },
                     colors = ButtonDefaults.filledTonalButtonColors(
-                        containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
-                        else MaterialTheme.colorScheme.surfaceVariant,
-                        contentColor = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
-                        else MaterialTheme.colorScheme.onSurface
+                        containerColor = if (selected) accent.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceContainerHighest,
+                        contentColor = if (selected) MaterialTheme.colorScheme.onSurface else accent
                     ),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    modifier = Modifier
+                        .size(40.dp)
+                        .then(
+                            if (selected) Modifier.border(2.dp, accent, CircleShape) else Modifier
+                        ),
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(0.dp)
                 ) {
                     Text(channel.label)
                 }
             }
-
-            Spacer(modifier = Modifier.weight(1f))
-            TextButton(onClick = resetChannel) {
-                Text("Reset ${activeChannel.label}")
+            }
+            OutlinedButton(onClick = resetChannel, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)) {
+                Text("Reset")
             }
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(10.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .pointerInput(activeChannel, pointHitRadiusPx) {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            val graphSize = minOf(maxWidth, 340.dp)
+            Box(
+                modifier = Modifier
+                    .size(graphSize)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .pointerInput(activeChannel, pointHitRadiusPx) {
                     fun toCurvePoint(pos: Offset): CurvePointState {
                         val w = size.width.toFloat().coerceAtLeast(1f)
                         val h = size.height.toFloat().coerceAtLeast(1f)
@@ -2969,67 +3037,68 @@ private fun CurvesEditor(
                         }
                     }
                 }
-        ) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val w = size.width
-                val h = size.height
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
 
-                // Grid (4x4)
-                for (i in 1..3) {
-                    val t = i / 4f
-                    drawLine(
-                        color = gridColor,
-                        start = Offset(w * t, 0f),
-                        end = Offset(w * t, h),
-                        strokeWidth = 1f
-                    )
-                    drawLine(
-                        color = gridColor,
-                        start = Offset(0f, h * t),
-                        end = Offset(w, h * t),
-                        strokeWidth = 1f
-                    )
-                }
-
-                // Histogram backdrop
-                histogram?.let { data ->
-                    val maxVal = data.maxOrNull() ?: 0f
-                    if (maxVal > 0f) {
-                        val path = Path().apply {
-                            moveTo(0f, h)
-                            for (i in data.indices) {
-                                val x = (i / 255f) * w
-                                val y = (data[i] / maxVal) * h
-                                lineTo(x, h - y)
-                            }
-                            lineTo(w, h)
-                            close()
-                        }
-                        drawPath(path, color = channelColor.copy(alpha = 0.18f))
+                    // Grid (4x4)
+                    for (i in 1..3) {
+                        val t = i / 4f
+                        drawLine(
+                            color = gridColor,
+                            start = Offset(w * t, 0f),
+                            end = Offset(w * t, h),
+                            strokeWidth = 1f
+                        )
+                        drawLine(
+                            color = gridColor,
+                            start = Offset(0f, h * t),
+                            end = Offset(w, h * t),
+                            strokeWidth = 1f
+                        )
                     }
-                }
 
-                // Curve
-                if (points.size >= 2) {
-                    val curvePath = buildCurvePath(points, size)
-                    drawPath(curvePath, color = channelColor, style = Stroke(width = 3f))
-                }
+                    // Histogram backdrop
+                    histogram?.let { data ->
+                        val maxVal = data.maxOrNull() ?: 0f
+                        if (maxVal > 0f) {
+                            val path = Path().apply {
+                                moveTo(0f, h)
+                                for (i in data.indices) {
+                                    val x = (i / 255f) * w
+                                    val y = (data[i] / maxVal) * h
+                                    lineTo(x, h - y)
+                                }
+                                lineTo(w, h)
+                                close()
+                            }
+                            drawPath(path, color = channelColor.copy(alpha = 0.18f))
+                        }
+                    }
 
-                // Points
-                points.forEach { p ->
-                    val x = p.x / 255f * w
-                    val y = (255f - p.y) / 255f * h
-                    drawCircle(
-                        color = Color.White,
-                        radius = 8f,
-                        center = Offset(x, y)
-                    )
-                    drawCircle(
-                        color = Color.Black.copy(alpha = 0.25f),
-                        radius = 8f,
-                        center = Offset(x, y),
-                        style = Stroke(width = 2f)
-                    )
+                    // Curve
+                    if (points.size >= 2) {
+                        val curvePath = buildCurvePath(points, size)
+                        drawPath(curvePath, color = channelColor, style = Stroke(width = 7f))
+                    }
+
+                    // Points
+                    points.forEach { p ->
+                        val x = p.x / 255f * w
+                        val y = (255f - p.y) / 255f * h
+                        drawCircle(
+                            color = Color.White,
+                            radius = 11f,
+                            center = Offset(x, y)
+                        )
+                        drawCircle(
+                            color = Color.Black.copy(alpha = 0.25f),
+                            radius = 11f,
+                            center = Offset(x, y),
+                            style = Stroke(width = 6f)
+                        )
+                    }
                 }
             }
         }
@@ -3120,65 +3189,71 @@ private fun ColorGradingEditor(
     onColorGradingChange: (ColorGradingState) -> Unit
 ) {
     val formatterInt: (Float) -> String = { it.roundToInt().toString() }
+    val isWide = LocalConfiguration.current.screenWidthDp >= 600
 
-    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-            Box(modifier = Modifier.fillMaxWidth(0.6f)) {
-                ColorWheelControl(
-                    label = "Midtones",
-                    value = colorGrading.midtones,
-                    defaultValue = HueSatLumState(),
-                    onValueChange = { onColorGradingChange(colorGrading.copy(midtones = it)) }
-                )
-            }
-        }
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val midWheelSize = if (isWide) 240.dp else minOf(maxWidth, 220.dp)
+        val sideWheelSize = minOf((maxWidth / 2) - 10.dp, if (isWide) 220.dp else 170.dp)
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Box(modifier = Modifier.weight(1f)) {
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            ColorWheelControl(
+                label = "Midtones",
+                wheelSize = midWheelSize,
+                modifier = Modifier.fillMaxWidth(),
+                value = colorGrading.midtones,
+                defaultValue = HueSatLumState(),
+                onValueChange = { onColorGradingChange(colorGrading.copy(midtones = it)) }
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 ColorWheelControl(
                     label = "Shadows",
+                    wheelSize = sideWheelSize,
+                    modifier = Modifier.weight(1f),
                     value = colorGrading.shadows,
                     defaultValue = HueSatLumState(),
                     onValueChange = { onColorGradingChange(colorGrading.copy(shadows = it)) }
                 )
-            }
-            Box(modifier = Modifier.weight(1f)) {
                 ColorWheelControl(
                     label = "Highlights",
+                    wheelSize = sideWheelSize,
+                    modifier = Modifier.weight(1f),
                     value = colorGrading.highlights,
                     defaultValue = HueSatLumState(),
                     onValueChange = { onColorGradingChange(colorGrading.copy(highlights = it)) }
                 )
             }
-        }
 
-        AdjustmentSlider(
-            label = "Blending",
-            value = colorGrading.blending,
-            range = 0f..100f,
-            step = 1f,
-            defaultValue = 50f,
-            formatter = formatterInt,
-            onValueChange = { onColorGradingChange(colorGrading.copy(blending = it)) }
-        )
-        AdjustmentSlider(
-            label = "Balance",
-            value = colorGrading.balance,
-            range = -100f..100f,
-            step = 1f,
-            defaultValue = 0f,
-            formatter = formatterInt,
-            onValueChange = { onColorGradingChange(colorGrading.copy(balance = it)) }
-        )
+            AdjustmentSlider(
+                label = "Blending",
+                value = colorGrading.blending,
+                range = 0f..100f,
+                step = 1f,
+                defaultValue = 50f,
+                formatter = formatterInt,
+                onValueChange = { onColorGradingChange(colorGrading.copy(blending = it)) }
+            )
+            AdjustmentSlider(
+                label = "Balance",
+                value = colorGrading.balance,
+                range = -100f..100f,
+                step = 1f,
+                defaultValue = 0f,
+                formatter = formatterInt,
+                onValueChange = { onColorGradingChange(colorGrading.copy(balance = it)) }
+            )
+        }
     }
 }
 
 @Composable
 private fun ColorWheelControl(
     label: String,
+    wheelSize: Dp,
+    modifier: Modifier = Modifier,
     value: HueSatLumState,
     defaultValue: HueSatLumState,
     onValueChange: (HueSatLumState) -> Unit
@@ -3186,30 +3261,36 @@ private fun ColorWheelControl(
     val formatterInt: (Float) -> String = { it.roundToInt().toString() }
     val latestValue by rememberUpdatedState(value)
     val latestOnValueChange by rememberUpdatedState(onValueChange)
-    val handleHitRadiusPx = with(LocalDensity.current) { 22.dp.toPx() }
+    val handleHitRadiusPx = with(LocalDensity.current) { 28.dp.toPx() }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .pointerInput(label) {
-                    detectTapGestures(onDoubleTap = { onValueChange(defaultValue) })
-                },
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(text = label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-            Text(
-                text = "H ${value.hue.roundToInt()}  S ${value.saturation.roundToInt()}",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "H ${value.hue.roundToInt()}  S ${value.saturation.roundToInt()}  L ${value.luminance.roundToInt()}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(onClick = { onValueChange(defaultValue) }, contentPadding = PaddingValues(0.dp)) {
+                    Text("Reset")
+                }
+            }
         }
 
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
+                .size(wheelSize)
+                .align(Alignment.CenterHorizontally)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
                 .pointerInput(Unit) {
                     fun calcHueSat(pos: Offset): HueSatLumState {
                         val w = size.width.toFloat().coerceAtLeast(1f)
@@ -3310,8 +3391,8 @@ private fun ColorWheelControl(
                 val py = center.y + kotlin.math.sin(angleRad) * radius * satNorm
                 val pointerColor = if (value.saturation > 5f) Color.hsv(value.hue, satNorm, 1f) else Color.Transparent
 
-                drawCircle(color = pointerColor, radius = 10f, center = Offset(px, py))
-                drawCircle(color = Color.White, radius = 10f, center = Offset(px, py), style = Stroke(3f))
+                drawCircle(color = pointerColor, radius = 14f, center = Offset(px, py))
+                drawCircle(color = Color.White, radius = 14f, center = Offset(px, py), style = Stroke(4f))
             }
         }
 
