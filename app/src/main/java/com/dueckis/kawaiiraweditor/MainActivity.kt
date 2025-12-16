@@ -21,9 +21,12 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -52,11 +55,18 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -69,6 +79,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -78,11 +89,14 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
@@ -120,7 +134,8 @@ import kotlin.ranges.ClosedFloatingPointRange
 private data class GalleryItem(
     val projectId: String,
     val fileName: String,
-    val thumbnail: Bitmap? = null
+    val thumbnail: Bitmap? = null,
+    val rating: Int = 0
 )
 
 private enum class Screen {
@@ -151,6 +166,99 @@ private enum class AdjustmentField {
     ToneMapper
 }
 
+private data class CurvePointState(
+    val x: Float,
+    val y: Float
+)
+
+private fun defaultCurvePoints(): List<CurvePointState> {
+    return listOf(CurvePointState(0f, 0f), CurvePointState(255f, 255f))
+}
+
+private data class CurvesState(
+    val luma: List<CurvePointState> = defaultCurvePoints(),
+    val red: List<CurvePointState> = defaultCurvePoints(),
+    val green: List<CurvePointState> = defaultCurvePoints(),
+    val blue: List<CurvePointState> = defaultCurvePoints()
+) {
+    fun toJsonObject(): JSONObject {
+        fun channel(points: List<CurvePointState>): JSONArray {
+            return JSONArray().apply {
+                points.forEach { p ->
+                    put(
+                        JSONObject().apply {
+                            put("x", p.x)
+                            put("y", p.y)
+                        }
+                    )
+                }
+            }
+        }
+
+        return JSONObject().apply {
+            put("luma", channel(luma))
+            put("red", channel(red))
+            put("green", channel(green))
+            put("blue", channel(blue))
+        }
+    }
+
+    fun isDefault(): Boolean {
+        fun isDefaultChannel(points: List<CurvePointState>): Boolean {
+            if (points.size != 2) return false
+            fun near(a: Float, b: Float) = kotlin.math.abs(a - b) <= 0.1f
+            return near(points[0].y, 0f) && near(points[1].y, 255f)
+        }
+        return isDefaultChannel(luma) && isDefaultChannel(red) && isDefaultChannel(green) && isDefaultChannel(blue)
+    }
+}
+
+private data class HueSatLumState(
+    val hue: Float = 0f,
+    val saturation: Float = 0f,
+    val luminance: Float = 0f
+) {
+    fun toJsonObject(): JSONObject {
+        return JSONObject().apply {
+            put("hue", hue)
+            put("saturation", saturation)
+            put("luminance", luminance)
+        }
+    }
+
+    fun isDefault(): Boolean {
+        fun nearZero(v: Float) = kotlin.math.abs(v) <= 0.000001f
+        return nearZero(hue) && nearZero(saturation) && nearZero(luminance)
+    }
+}
+
+private data class ColorGradingState(
+    val shadows: HueSatLumState = HueSatLumState(),
+    val midtones: HueSatLumState = HueSatLumState(),
+    val highlights: HueSatLumState = HueSatLumState(),
+    val blending: Float = 50f,
+    val balance: Float = 0f
+) {
+    fun toJsonObject(): JSONObject {
+        return JSONObject().apply {
+            put("shadows", shadows.toJsonObject())
+            put("midtones", midtones.toJsonObject())
+            put("highlights", highlights.toJsonObject())
+            put("blending", blending)
+            put("balance", balance)
+        }
+    }
+
+    fun isDefault(): Boolean {
+        fun near(a: Float, b: Float) = kotlin.math.abs(a - b) <= 0.000001f
+        return shadows.isDefault() &&
+            midtones.isDefault() &&
+            highlights.isDefault() &&
+            near(blending, 50f) &&
+            near(balance, 0f)
+    }
+}
+
 private data class AdjustmentState(
     val brightness: Float = 0f,
     val contrast: Float = 0f,
@@ -171,7 +279,9 @@ private data class AdjustmentState(
     val colorNoiseReduction: Float = 0f,
     val chromaticAberrationRedCyan: Float = 0f,
     val chromaticAberrationBlueYellow: Float = 0f,
-    val toneMapper: String = "basic"
+    val toneMapper: String = "basic",
+    val curves: CurvesState = CurvesState(),
+    val colorGrading: ColorGradingState = ColorGradingState()
 ) {
     fun toJsonObject(includeToneMapper: Boolean = true): JSONObject {
         return JSONObject().apply {
@@ -194,6 +304,8 @@ private data class AdjustmentState(
             put("colorNoiseReduction", colorNoiseReduction)
             put("chromaticAberrationRedCyan", chromaticAberrationRedCyan)
             put("chromaticAberrationBlueYellow", chromaticAberrationBlueYellow)
+            put("curves", curves.toJsonObject())
+            put("colorGrading", colorGrading.toJsonObject())
             if (includeToneMapper) {
                 put("toneMapper", toneMapper)
             }
@@ -272,8 +384,39 @@ private enum class SubMaskMode {
     Subtractive,
 }
 
+private enum class SubMaskType(val id: String) {
+    Brush("brush"),
+    Linear("linear"),
+    Radial("radial"),
+}
+
+private enum class MaskTapMode {
+    None,
+    SetRadialCenter,
+    SetLinearStart,
+    SetLinearEnd,
+}
+
+private data class LinearMaskParametersState(
+    val startX: Float = 0.5f,
+    val startY: Float = 0.2f,
+    val endX: Float = 0.5f,
+    val endY: Float = 0.8f,
+    val range: Float = 0.25f
+)
+
+private data class RadialMaskParametersState(
+    val centerX: Float = 0.5f,
+    val centerY: Float = 0.5f,
+    val radiusX: Float = 0.35f,
+    val radiusY: Float = 0.35f,
+    val rotation: Float = 0f,
+    val feather: Float = 0.5f
+)
+
 private enum class EditorPanelTab {
     Adjustments,
+    Color,
     Masks,
 }
 
@@ -297,7 +440,9 @@ private fun AdjustmentState.isNeutralForMask(): Boolean {
         nearZero(lumaNoiseReduction) &&
         nearZero(colorNoiseReduction) &&
         nearZero(chromaticAberrationRedCyan) &&
-        nearZero(chromaticAberrationBlueYellow)
+        nearZero(chromaticAberrationBlueYellow) &&
+        curves.isDefault() &&
+        colorGrading.isDefault()
 }
 
 private data class MaskPoint(
@@ -315,9 +460,12 @@ private data class BrushLineState(
 
 private data class SubMaskState(
     val id: String,
+    val type: String = SubMaskType.Brush.id,
     val visible: Boolean = true,
     val mode: SubMaskMode = SubMaskMode.Additive,
-    val lines: List<BrushLineState> = emptyList()
+    val lines: List<BrushLineState> = emptyList(),
+    val linear: LinearMaskParametersState = LinearMaskParametersState(),
+    val radial: RadialMaskParametersState = RadialMaskParametersState()
 )
 
 private data class MaskState(
@@ -350,38 +498,61 @@ private data class MaskState(
 private fun SubMaskState.toJsonObject(): JSONObject {
     return JSONObject().apply {
         put("id", id)
-        put("type", "brush")
+        put("type", type)
         put("visible", visible)
         put("mode", mode.name.lowercase(Locale.US))
         put(
             "parameters",
-            JSONObject().apply {
-                put(
-                    "lines",
-                    JSONArray().apply {
-                        lines.forEach { line ->
-                            put(
-                                JSONObject().apply {
-                                    put("tool", line.tool)
-                                    put("brushSize", line.brushSize)
-                                    put("feather", line.feather)
-                                    put("order", line.order)
-                                    put(
-                                        "points",
-                                        JSONArray().apply {
-                                            line.points.forEach { point ->
-                                                put(JSONObject().apply {
-                                                    put("x", point.x)
-                                                    put("y", point.y)
-                                                })
+            when (type) {
+                SubMaskType.Brush.id -> JSONObject().apply {
+                    put(
+                        "lines",
+                        JSONArray().apply {
+                            lines.forEach { line ->
+                                put(
+                                    JSONObject().apply {
+                                        put("tool", line.tool)
+                                        put("brushSize", line.brushSize)
+                                        put("feather", line.feather)
+                                        put("order", line.order)
+                                        put(
+                                            "points",
+                                            JSONArray().apply {
+                                                line.points.forEach { point ->
+                                                    put(
+                                                        JSONObject().apply {
+                                                            put("x", point.x)
+                                                            put("y", point.y)
+                                                        }
+                                                    )
+                                                }
                                             }
-                                        }
-                                    )
-                                }
-                            )
+                                        )
+                                    }
+                                )
+                            }
                         }
-                    }
-                )
+                    )
+                }
+
+                SubMaskType.Linear.id -> JSONObject().apply {
+                    put("startX", linear.startX)
+                    put("startY", linear.startY)
+                    put("endX", linear.endX)
+                    put("endY", linear.endY)
+                    put("range", linear.range)
+                }
+
+                SubMaskType.Radial.id -> JSONObject().apply {
+                    put("centerX", radial.centerX)
+                    put("centerY", radial.centerY)
+                    put("radiusX", radial.radiusX)
+                    put("radiusY", radial.radiusY)
+                    put("rotation", radial.rotation)
+                    put("feather", radial.feather)
+                }
+
+                else -> JSONObject()
             }
         )
     }
@@ -465,6 +636,56 @@ private fun buildMaskOverlayBitmap(mask: MaskState, targetWidth: Int, targetHeig
         canvas.drawPath(path, paint)
     }
 
+    fun lenPx(value: Float): Float {
+        return if (value <= 1.5f) (value * baseDim).coerceAtLeast(0f) else value
+    }
+
+    val addFill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(90, 255, 23, 68)
+        style = android.graphics.Paint.Style.FILL
+    }
+    val subFill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+        style = android.graphics.Paint.Style.FILL
+    }
+
+    mask.subMasks.forEach { sub ->
+        if (!sub.visible) return@forEach
+        val fill = if (sub.mode == SubMaskMode.Additive) addFill else subFill
+        when (sub.type) {
+            SubMaskType.Radial.id -> {
+                val cx = denorm(sub.radial.centerX, width)
+                val cy = denorm(sub.radial.centerY, height)
+                val rx = lenPx(sub.radial.radiusX)
+                val ry = lenPx(sub.radial.radiusY)
+                if (rx <= 0.5f || ry <= 0.5f) return@forEach
+                val rect = android.graphics.RectF(cx - rx, cy - ry, cx + rx, cy + ry)
+                canvas.drawOval(rect, fill)
+            }
+
+            SubMaskType.Linear.id -> {
+                val sx = denorm(sub.linear.startX, width)
+                val sy = denorm(sub.linear.startY, height)
+                val ex = denorm(sub.linear.endX, width)
+                val ey = denorm(sub.linear.endY, height)
+                val dx = ex - sx
+                val dy = ey - sy
+                val len = kotlin.math.sqrt(dx * dx + dy * dy).coerceAtLeast(0.001f)
+                val nx = -dy / len
+                val ny = dx / len
+                val half = lenPx(sub.linear.range)
+                val path = android.graphics.Path().apply {
+                    moveTo(sx + nx * half, sy + ny * half)
+                    lineTo(ex + nx * half, ey + ny * half)
+                    lineTo(ex - nx * half, ey - ny * half)
+                    lineTo(sx - nx * half, sy - ny * half)
+                    close()
+                }
+                canvas.drawPath(path, fill)
+            }
+        }
+    }
+
     return overlay
 }
 
@@ -541,6 +762,7 @@ class MainActivity : ComponentActivity() {
 private fun RapidRawEditorScreen() {
     val context = LocalContext.current
     val storage = remember { ProjectStorage(context) }
+    val coroutineScope = rememberCoroutineScope()
     
     var currentScreen by remember { mutableStateOf(Screen.Gallery) }
     var galleryItems by remember { mutableStateOf<List<GalleryItem>>(emptyList()) }
@@ -559,7 +781,8 @@ private fun RapidRawEditorScreen() {
                 GalleryItem(
                     projectId = metadata.id,
                     fileName = metadata.fileName,
-                    thumbnail = thumbnail
+                    thumbnail = thumbnail,
+                    rating = metadata.rating
                 )
             }
         }
@@ -574,6 +797,16 @@ private fun RapidRawEditorScreen() {
             },
             onAddClick = { newItem ->
                 galleryItems = galleryItems + newItem
+            },
+            onRatingChange = { projectId, rating ->
+                coroutineScope.launch {
+                    withContext(Dispatchers.IO) {
+                        storage.setRating(projectId, rating)
+                    }
+                    galleryItems = galleryItems.map { item ->
+                        if (item.projectId != projectId) item else item.copy(rating = rating.coerceIn(0, 5))
+                    }
+                }
             }
         )
         Screen.Editor -> EditorScreen(
@@ -590,7 +823,8 @@ private fun RapidRawEditorScreen() {
 private fun GalleryScreen(
     items: List<GalleryItem>,
     onItemClick: (GalleryItem) -> Unit,
-    onAddClick: (GalleryItem) -> Unit
+    onAddClick: (GalleryItem) -> Unit,
+    onRatingChange: (String, Int) -> Unit
 ) {
     val context = LocalContext.current
     val storage = remember { ProjectStorage(context) }
@@ -674,7 +908,10 @@ private fun GalleryScreen(
                     items(items.size) { index ->
                         GalleryItemCard(
                             item = items[index],
-                            onClick = { onItemClick(items[index]) }
+                            onClick = { onItemClick(items[index]) },
+                            onRatingChange = { rating ->
+                                onRatingChange(items[index].projectId, rating)
+                            }
                         )
                     }
                 }
@@ -698,7 +935,8 @@ private fun GalleryScreen(
 @Composable
 private fun GalleryItemCard(
     item: GalleryItem,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onRatingChange: (Int) -> Unit
 ) {
     Card(
         onClick = onClick,
@@ -744,6 +982,29 @@ private fun GalleryItemCard(
                 maxLines = 2,
                 color = MaterialTheme.colorScheme.onSurface
             )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.Start,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                for (i in 1..5) {
+                    val filled = i <= item.rating
+                    IconButton(
+                        onClick = { onRatingChange(if (item.rating == i) 0 else i) },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (filled) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = "Set rating to $i",
+                            tint = if (filled) Color(0xFFFFC107) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -768,15 +1029,19 @@ private fun EditorScreen(
     var adjustments by remember { mutableStateOf(AdjustmentState()) }
     var masks by remember { mutableStateOf<List<MaskState>>(emptyList()) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var histogramData by remember { mutableStateOf<HistogramData?>(null) }
     var isLoading by remember { mutableStateOf(false) }
     var isExporting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
+    var showMetadataDialog by remember { mutableStateOf(false) }
+    var metadataJson by remember { mutableStateOf<String?>(null) }
 
     var panelTab by remember { mutableStateOf(EditorPanelTab.Adjustments) }
     var selectedMaskId by remember { mutableStateOf<String?>(null) }
     var selectedSubMaskId by remember { mutableStateOf<String?>(null) }
     var isPaintingMask by remember { mutableStateOf(false) }
+    var maskTapMode by remember { mutableStateOf(MaskTapMode.None) }
     var brushSize by remember { mutableStateOf(60f) }
     var showMaskOverlay by remember { mutableStateOf(true) }
     val strokeOrder = remember { AtomicLong(0L) }
@@ -822,6 +1087,50 @@ private fun EditorScreen(
         if (savedAdjustmentsJson != "{}") {
             try {
                 val json = org.json.JSONObject(savedAdjustmentsJson)
+
+                fun parseCurvePoints(curvesObj: JSONObject?, key: String): List<CurvePointState> {
+                    val arr = curvesObj?.optJSONArray(key) ?: return defaultCurvePoints()
+                    val points = (0 until arr.length()).mapNotNull { idx ->
+                        val pObj = arr.optJSONObject(idx) ?: return@mapNotNull null
+                        CurvePointState(
+                            x = pObj.optDouble("x", 0.0).toFloat(),
+                            y = pObj.optDouble("y", 0.0).toFloat()
+                        )
+                    }
+                    return if (points.size >= 2) points else defaultCurvePoints()
+                }
+
+                fun parseCurves(curvesObj: JSONObject?): CurvesState {
+                    return CurvesState(
+                        luma = parseCurvePoints(curvesObj, "luma"),
+                        red = parseCurvePoints(curvesObj, "red"),
+                        green = parseCurvePoints(curvesObj, "green"),
+                        blue = parseCurvePoints(curvesObj, "blue")
+                    )
+                }
+
+                fun parseHueSatLum(parent: JSONObject?, key: String): HueSatLumState {
+                    val obj = parent?.optJSONObject(key) ?: return HueSatLumState()
+                    return HueSatLumState(
+                        hue = obj.optDouble("hue", 0.0).toFloat(),
+                        saturation = obj.optDouble("saturation", 0.0).toFloat(),
+                        luminance = obj.optDouble("luminance", 0.0).toFloat()
+                    )
+                }
+
+                fun parseColorGrading(obj: JSONObject?): ColorGradingState {
+                    if (obj == null) return ColorGradingState()
+                    return ColorGradingState(
+                        shadows = parseHueSatLum(obj, "shadows"),
+                        midtones = parseHueSatLum(obj, "midtones"),
+                        highlights = parseHueSatLum(obj, "highlights"),
+                        blending = obj.optDouble("blending", 50.0).toFloat(),
+                        balance = obj.optDouble("balance", 0.0).toFloat()
+                    )
+                }
+
+                val parsedCurves = parseCurves(json.optJSONObject("curves"))
+                val parsedColorGrading = parseColorGrading(json.optJSONObject("colorGrading"))
                 adjustments = AdjustmentState(
                     brightness = json.optDouble("brightness", 0.0).toFloat(),
                     contrast = json.optDouble("contrast", 0.0).toFloat(),
@@ -842,7 +1151,9 @@ private fun EditorScreen(
                     colorNoiseReduction = json.optDouble("colorNoiseReduction", 0.0).toFloat(),
                     chromaticAberrationRedCyan = json.optDouble("chromaticAberrationRedCyan", 0.0).toFloat(),
                     chromaticAberrationBlueYellow = json.optDouble("chromaticAberrationBlueYellow", 0.0).toFloat(),
-                    toneMapper = json.optString("toneMapper", "basic")
+                    toneMapper = json.optString("toneMapper", "basic"),
+                    curves = parsedCurves,
+                    colorGrading = parsedColorGrading
                 )
 
                 val masksArr = json.optJSONArray("masks") ?: JSONArray()
@@ -851,6 +1162,8 @@ private fun EditorScreen(
                     val maskId = maskObj.optString("id").takeIf { it.isNotBlank() }
                         ?: java.util.UUID.randomUUID().toString()
                     val maskAdjustmentsObj = maskObj.optJSONObject("adjustments") ?: JSONObject()
+                    val maskCurves = parseCurves(maskAdjustmentsObj.optJSONObject("curves"))
+                    val maskColorGrading = parseColorGrading(maskAdjustmentsObj.optJSONObject("colorGrading"))
                     val maskAdjustments = AdjustmentState(
                         brightness = maskAdjustmentsObj.optDouble("brightness", 0.0).toFloat(),
                         contrast = maskAdjustmentsObj.optDouble("contrast", 0.0).toFloat(),
@@ -871,7 +1184,9 @@ private fun EditorScreen(
                         colorNoiseReduction = maskAdjustmentsObj.optDouble("colorNoiseReduction", 0.0).toFloat(),
                         chromaticAberrationRedCyan = maskAdjustmentsObj.optDouble("chromaticAberrationRedCyan", 0.0).toFloat(),
                         chromaticAberrationBlueYellow = maskAdjustmentsObj.optDouble("chromaticAberrationBlueYellow", 0.0).toFloat(),
-                        toneMapper = adjustments.toneMapper
+                        toneMapper = adjustments.toneMapper,
+                        curves = maskCurves,
+                        colorGrading = maskColorGrading
                     )
 
                     val subMasksArr = maskObj.optJSONArray("subMasks") ?: JSONArray()
@@ -879,34 +1194,75 @@ private fun EditorScreen(
                         val subObj = subMasksArr.optJSONObject(sIdx) ?: return@mapNotNull null
                         val subId = subObj.optString("id").takeIf { it.isNotBlank() }
                             ?: java.util.UUID.randomUUID().toString()
+                        val subType = subObj.optString("type", SubMaskType.Brush.id).lowercase(Locale.US)
                         val modeStr = subObj.optString("mode", "additive").lowercase(Locale.US)
                         val mode = if (modeStr == "subtractive") SubMaskMode.Subtractive else SubMaskMode.Additive
                         val paramsObj = subObj.optJSONObject("parameters") ?: JSONObject()
-                        val linesArr = paramsObj.optJSONArray("lines") ?: JSONArray()
-                        val lines = (0 until linesArr.length()).mapNotNull { lIdx ->
-                            val lineObj = linesArr.optJSONObject(lIdx) ?: return@mapNotNull null
-                            val pointsArr = lineObj.optJSONArray("points") ?: JSONArray()
-                            val points = (0 until pointsArr.length()).mapNotNull { pIdx ->
-                                val pObj = pointsArr.optJSONObject(pIdx) ?: return@mapNotNull null
-                                MaskPoint(
-                                    x = pObj.optDouble("x", 0.0).toFloat(),
-                                    y = pObj.optDouble("y", 0.0).toFloat()
+                        val visible = subObj.optBoolean("visible", true)
+
+                        when (subType) {
+                            SubMaskType.Radial.id -> {
+                                SubMaskState(
+                                    id = subId,
+                                    type = SubMaskType.Radial.id,
+                                    visible = visible,
+                                    mode = mode,
+                                    radial = RadialMaskParametersState(
+                                        centerX = paramsObj.optDouble("centerX", 0.5).toFloat(),
+                                        centerY = paramsObj.optDouble("centerY", 0.5).toFloat(),
+                                        radiusX = paramsObj.optDouble("radiusX", 0.35).toFloat(),
+                                        radiusY = paramsObj.optDouble("radiusY", 0.35).toFloat(),
+                                        rotation = paramsObj.optDouble("rotation", 0.0).toFloat(),
+                                        feather = paramsObj.optDouble("feather", 0.5).toFloat()
+                                    )
                                 )
                             }
-                            BrushLineState(
-                                tool = lineObj.optString("tool", "brush"),
-                                brushSize = lineObj.optDouble("brushSize", 50.0).toFloat(),
-                                feather = lineObj.optDouble("feather", 0.5).toFloat(),
-                                order = lineObj.optLong("order", 0L),
-                                points = points
-                            )
+
+                            SubMaskType.Linear.id -> {
+                                SubMaskState(
+                                    id = subId,
+                                    type = SubMaskType.Linear.id,
+                                    visible = visible,
+                                    mode = mode,
+                                    linear = LinearMaskParametersState(
+                                        startX = paramsObj.optDouble("startX", 0.5).toFloat(),
+                                        startY = paramsObj.optDouble("startY", 0.2).toFloat(),
+                                        endX = paramsObj.optDouble("endX", 0.5).toFloat(),
+                                        endY = paramsObj.optDouble("endY", 0.8).toFloat(),
+                                        range = paramsObj.optDouble("range", 0.25).toFloat()
+                                    )
+                                )
+                            }
+
+                            else -> {
+                                val linesArr = paramsObj.optJSONArray("lines") ?: JSONArray()
+                                val lines = (0 until linesArr.length()).mapNotNull { lIdx ->
+                                    val lineObj = linesArr.optJSONObject(lIdx) ?: return@mapNotNull null
+                                    val pointsArr = lineObj.optJSONArray("points") ?: JSONArray()
+                                    val points = (0 until pointsArr.length()).mapNotNull { pIdx ->
+                                        val pObj = pointsArr.optJSONObject(pIdx) ?: return@mapNotNull null
+                                        MaskPoint(
+                                            x = pObj.optDouble("x", 0.0).toFloat(),
+                                            y = pObj.optDouble("y", 0.0).toFloat()
+                                        )
+                                    }
+                                    BrushLineState(
+                                        tool = lineObj.optString("tool", "brush"),
+                                        brushSize = lineObj.optDouble("brushSize", 50.0).toFloat(),
+                                        feather = lineObj.optDouble("feather", 0.5).toFloat(),
+                                        order = lineObj.optLong("order", 0L),
+                                        points = points
+                                    )
+                                }
+                                SubMaskState(
+                                    id = subId,
+                                    type = SubMaskType.Brush.id,
+                                    visible = visible,
+                                    mode = mode,
+                                    lines = lines
+                                )
+                            }
                         }
-                        SubMaskState(
-                            id = subId,
-                            visible = subObj.optBoolean("visible", true),
-                            mode = mode,
-                            lines = lines
-                        )
                     }
 
                     MaskState(
@@ -933,6 +1289,28 @@ private fun EditorScreen(
                 // Keep default adjustments if parsing fails
             }
         }
+    }
+
+    LaunchedEffect(sessionHandle) {
+        metadataJson = null
+    }
+
+    LaunchedEffect(previewBitmap) {
+        val bmp = previewBitmap ?: run {
+            histogramData = null
+            return@LaunchedEffect
+        }
+
+        // Avoid recomputing the histogram for super-low / low previews while dragging.
+        if (bmp.width < 512 && bmp.height < 512) {
+            return@LaunchedEffect
+        }
+
+        delay(80)
+        if (previewBitmap !== bmp) {
+            return@LaunchedEffect
+        }
+        histogramData = withContext(Dispatchers.Default) { calculateHistogram(bmp) }
     }
 
     LaunchedEffect(adjustments, masks) {
@@ -1044,8 +1422,46 @@ private fun EditorScreen(
     }
 
     val selectedMaskForOverlay = masks.firstOrNull { it.id == selectedMaskId }
+    val selectedSubMaskForEdit = selectedMaskForOverlay?.subMasks?.firstOrNull { it.id == selectedSubMaskId }
     val isMaskMode = panelTab == EditorPanelTab.Masks
-    val isPaintingEnabled = isMaskMode && isPaintingMask && selectedMaskId != null && selectedSubMaskId != null
+    val isPaintingEnabled =
+        isMaskMode && isPaintingMask && selectedMaskId != null && selectedSubMaskId != null &&
+            selectedSubMaskForEdit?.type == SubMaskType.Brush.id
+
+    val onMaskTap: ((MaskPoint) -> Unit)? =
+        if (!isMaskMode || maskTapMode == MaskTapMode.None) null
+        else tap@{ point ->
+            val maskId = selectedMaskId
+            val subId = selectedSubMaskId
+            if (maskId == null || subId == null) {
+                maskTapMode = MaskTapMode.None
+                return@tap
+            }
+            masks = masks.map { mask ->
+                if (mask.id != maskId) return@map mask
+                mask.copy(
+                    subMasks = mask.subMasks.map { sub ->
+                        if (sub.id != subId) return@map sub
+                        when (maskTapMode) {
+                            MaskTapMode.SetRadialCenter ->
+                                if (sub.type != SubMaskType.Radial.id) sub
+                                else sub.copy(radial = sub.radial.copy(centerX = point.x, centerY = point.y))
+
+                            MaskTapMode.SetLinearStart ->
+                                if (sub.type != SubMaskType.Linear.id) sub
+                                else sub.copy(linear = sub.linear.copy(startX = point.x, startY = point.y))
+
+                            MaskTapMode.SetLinearEnd ->
+                                if (sub.type != SubMaskType.Linear.id) sub
+                                else sub.copy(linear = sub.linear.copy(endX = point.x, endY = point.y))
+
+                            MaskTapMode.None -> sub
+                        }
+                    }
+                )
+            }
+            maskTapMode = MaskTapMode.None
+        }
 
     val onBrushStrokeFinished: (List<MaskPoint>, Float) -> Unit = onBrush@{ points, brushSizeNorm ->
         val maskId = selectedMaskId ?: return@onBrush
@@ -1087,10 +1503,13 @@ private fun EditorScreen(
                                 bitmap = previewBitmap,
                                 isLoading = isLoading,
                                 maskOverlay = selectedMaskForOverlay,
+                                activeSubMask = selectedSubMaskForEdit,
                                 isMaskMode = isMaskMode,
                                 showMaskOverlay = showMaskOverlay,
                                 isPainting = isPaintingEnabled,
                                 brushSize = brushSize,
+                                maskTapMode = maskTapMode,
+                                onMaskTap = onMaskTap,
                                 onBrushStrokeFinished = onBrushStrokeFinished
                             )
                         }
@@ -1117,6 +1536,7 @@ private fun EditorScreen(
                                     onPanelTabChange = { panelTab = it },
                                     adjustments = adjustments,
                                     onAdjustmentsChange = { adjustments = it },
+                                    histogramData = histogramData,
                                     masks = masks,
                                     onMasksChange = { masks = it },
                                     selectedMaskId = selectedMaskId,
@@ -1128,7 +1548,9 @@ private fun EditorScreen(
                                     showMaskOverlay = showMaskOverlay,
                                     onShowMaskOverlayChange = { showMaskOverlay = it },
                                     brushSize = brushSize,
-                                    onBrushSizeChange = { brushSize = it }
+                                    onBrushSizeChange = { brushSize = it },
+                                    maskTapMode = maskTapMode,
+                                    onMaskTapModeChange = { maskTapMode = it }
                                 )
                             
                             Spacer(modifier = Modifier.height(16.dp))
@@ -1212,6 +1634,18 @@ private fun EditorScreen(
                                 modifier = Modifier.weight(1f),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                            IconButton(
+                                enabled = sessionHandle != 0L,
+                                onClick = {
+                                    showMetadataDialog = true
+                                }
+                            ) {
+                                Icon(
+                                    Icons.Default.Info,
+                                    contentDescription = "Image info",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                     }
                 }
@@ -1248,6 +1682,18 @@ private fun EditorScreen(
                                 modifier = Modifier.weight(1f),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                            IconButton(
+                                enabled = sessionHandle != 0L,
+                                onClick = {
+                                    showMetadataDialog = true
+                                }
+                            ) {
+                                Icon(
+                                    Icons.Default.Info,
+                                    contentDescription = "Image info",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                     }
                     
@@ -1261,10 +1707,13 @@ private fun EditorScreen(
                             bitmap = previewBitmap,
                             isLoading = isLoading,
                             maskOverlay = selectedMaskForOverlay,
+                            activeSubMask = selectedSubMaskForEdit,
                             isMaskMode = isMaskMode,
                             showMaskOverlay = showMaskOverlay,
                             isPainting = isPaintingEnabled,
                             brushSize = brushSize,
+                            maskTapMode = maskTapMode,
+                            onMaskTap = onMaskTap,
                             onBrushStrokeFinished = onBrushStrokeFinished
                         )
                     }
@@ -1332,6 +1781,7 @@ private fun EditorScreen(
                                 onPanelTabChange = { panelTab = it },
                                 adjustments = adjustments,
                                 onAdjustmentsChange = { adjustments = it },
+                                histogramData = histogramData,
                                 masks = masks,
                                 onMasksChange = { masks = it },
                                 selectedMaskId = selectedMaskId,
@@ -1343,7 +1793,9 @@ private fun EditorScreen(
                                 showMaskOverlay = showMaskOverlay,
                                 onShowMaskOverlayChange = { showMaskOverlay = it },
                                 brushSize = brushSize,
-                                onBrushSizeChange = { brushSize = it }
+                                onBrushSizeChange = { brushSize = it },
+                                maskTapMode = maskTapMode,
+                                onMaskTapModeChange = { maskTapMode = it }
                             )
                             Spacer(modifier = Modifier.height(20.dp))
                         }
@@ -1360,6 +1812,62 @@ private fun EditorScreen(
                 color = MaterialTheme.colorScheme.surface
             ) {}
         }
+    }
+
+    if (showMetadataDialog) {
+        val handle = sessionHandle
+        LaunchedEffect(handle) {
+            if (handle != 0L && metadataJson == null) {
+                metadataJson = withContext(renderDispatcher) {
+                    runCatching { LibRawDecoder.getMetadataJsonFromSession(handle) }.getOrNull()
+                }
+            }
+        }
+
+        val pairs = remember(metadataJson) {
+            val json = metadataJson ?: return@remember emptyList()
+            runCatching {
+                val obj = JSONObject(json)
+                listOf(
+                    "Make" to obj.optString("make"),
+                    "Model" to obj.optString("model"),
+                    "Lens" to obj.optString("lens"),
+                    "ISO" to obj.optString("iso"),
+                    "Exposure" to obj.optString("exposureTime"),
+                    "Aperture" to obj.optString("fNumber"),
+                    "Focal Length" to obj.optString("focalLength"),
+                    "Date" to obj.optString("dateTimeOriginal"),
+                ).filter { it.second.isNotBlank() && it.second != "null" }
+            }.getOrDefault(emptyList())
+        }
+
+        AlertDialog(
+            onDismissRequest = { showMetadataDialog = false },
+            confirmButton = {
+                TextButton(onClick = { showMetadataDialog = false }) { Text("Close") }
+            },
+            title = { Text("RAW Metadata") },
+            text = {
+                if (metadataJson == null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("Reading metadata...")
+                    }
+                } else if (pairs.isEmpty()) {
+                    Text("No metadata available.")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        pairs.forEach { (k, v) ->
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(k, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(v, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -1422,6 +1930,7 @@ private fun TabbedEditorControls(
     onPanelTabChange: (EditorPanelTab) -> Unit,
     adjustments: AdjustmentState,
     onAdjustmentsChange: (AdjustmentState) -> Unit,
+    histogramData: HistogramData?,
     masks: List<MaskState>,
     onMasksChange: (List<MaskState>) -> Unit,
     selectedMaskId: String?,
@@ -1433,21 +1942,35 @@ private fun TabbedEditorControls(
     showMaskOverlay: Boolean,
     onShowMaskOverlayChange: (Boolean) -> Unit,
     brushSize: Float,
-    onBrushSizeChange: (Float) -> Unit
+    onBrushSizeChange: (Float) -> Unit,
+    maskTapMode: MaskTapMode,
+    onMaskTapModeChange: (MaskTapMode) -> Unit
 ) {
-    TabRow(selectedTabIndex = if (panelTab == EditorPanelTab.Adjustments) 0 else 1) {
+    val tabs = listOf(EditorPanelTab.Adjustments, EditorPanelTab.Color, EditorPanelTab.Masks)
+    TabRow(selectedTabIndex = tabs.indexOf(panelTab).coerceAtLeast(0)) {
         Tab(
             selected = panelTab == EditorPanelTab.Adjustments,
             onClick = {
                 onPaintingMaskChange(false)
+                onMaskTapModeChange(MaskTapMode.None)
                 onPanelTabChange(EditorPanelTab.Adjustments)
             },
             text = { Text("Adjust") }
         )
         Tab(
+            selected = panelTab == EditorPanelTab.Color,
+            onClick = {
+                onPaintingMaskChange(false)
+                onMaskTapModeChange(MaskTapMode.None)
+                onPanelTabChange(EditorPanelTab.Color)
+            },
+            text = { Text("Curves") }
+        )
+        Tab(
             selected = panelTab == EditorPanelTab.Masks,
             onClick = {
                 onShowMaskOverlayChange(true)
+                onMaskTapModeChange(MaskTapMode.None)
                 onPanelTabChange(EditorPanelTab.Masks)
             },
             text = { Text("Mask") }
@@ -1487,27 +2010,80 @@ private fun TabbedEditorControls(
             }
         }
 
+        EditorPanelTab.Color -> {
+            Text(
+                text = "Curves",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            CurvesEditor(
+                adjustments = adjustments,
+                histogramData = histogramData,
+                onAdjustmentsChange = onAdjustmentsChange
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Color Grading",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            ColorGradingEditor(
+                colorGrading = adjustments.colorGrading,
+                onColorGradingChange = { updated ->
+                    onAdjustmentsChange(adjustments.copy(colorGrading = updated))
+                }
+            )
+        }
+
         EditorPanelTab.Masks -> {
             val selectedMask = masks.firstOrNull { it.id == selectedMaskId }
             val selectedSubMask = selectedMask?.subMasks?.firstOrNull { it.id == selectedSubMaskId }
 
-            FilledTonalButton(
-                onClick = {
-                    val newMaskId = java.util.UUID.randomUUID().toString()
-                    val newSubId = java.util.UUID.randomUUID().toString()
-                    val newMask = MaskState(
-                        id = newMaskId,
-                        name = "Mask ${masks.size + 1}",
-                        subMasks = listOf(SubMaskState(id = newSubId, mode = SubMaskMode.Additive))
-                    )
-                    onMasksChange(masks + newMask)
-                    onSelectedMaskIdChange(newMaskId)
-                    onSelectedSubMaskIdChange(newSubId)
-                    onPaintingMaskChange(true)
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Add Brush Mask")
+            fun newSubMaskState(id: String, mode: SubMaskMode, type: SubMaskType): SubMaskState {
+                return when (type) {
+                    SubMaskType.Brush -> SubMaskState(id = id, type = type.id, mode = mode)
+                    SubMaskType.Linear -> SubMaskState(id = id, type = type.id, mode = mode, linear = LinearMaskParametersState())
+                    SubMaskType.Radial -> SubMaskState(id = id, type = type.id, mode = mode, radial = RadialMaskParametersState())
+                }
+            }
+
+            var showAddMaskMenu by remember { mutableStateOf(false) }
+            Box {
+                FilledTonalButton(
+                    onClick = { showAddMaskMenu = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Add Mask")
+                }
+                DropdownMenu(
+                    expanded = showAddMaskMenu,
+                    onDismissRequest = { showAddMaskMenu = false }
+                ) {
+                    listOf(SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
+                        DropdownMenuItem(
+                            text = { Text(type.name.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }) },
+                            onClick = {
+                                showAddMaskMenu = false
+                                onMaskTapModeChange(MaskTapMode.None)
+                                val newMaskId = java.util.UUID.randomUUID().toString()
+                                val newSubId = java.util.UUID.randomUUID().toString()
+                                val newMask = MaskState(
+                                    id = newMaskId,
+                                    name = "Mask ${masks.size + 1}",
+                                    subMasks = listOf(newSubMaskState(newSubId, SubMaskMode.Additive, type))
+                                )
+                                onMasksChange(masks + newMask)
+                                onSelectedMaskIdChange(newMaskId)
+                                onSelectedSubMaskIdChange(newSubId)
+                                onPaintingMaskChange(type == SubMaskType.Brush)
+                            }
+                        )
+                    }
+                }
             }
 
             if (masks.isEmpty()) {
@@ -1641,30 +2217,66 @@ private fun TabbedEditorControls(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FilledTonalButton(
-                    onClick = {
-                        val newSubId = java.util.UUID.randomUUID().toString()
-                        val updated = masks.map { m ->
-                            if (m.id != selectedMask.id) m
-                            else m.copy(subMasks = m.subMasks + SubMaskState(id = newSubId, mode = SubMaskMode.Additive))
+                var showAddSubMenu by remember { mutableStateOf(false) }
+                var showSubSubMenu by remember { mutableStateOf(false) }
+
+                Box(modifier = Modifier.weight(1f)) {
+                    FilledTonalButton(
+                        onClick = { showAddSubMenu = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Add +") }
+                    DropdownMenu(
+                        expanded = showAddSubMenu,
+                        onDismissRequest = { showAddSubMenu = false }
+                    ) {
+                        listOf(SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
+                            DropdownMenuItem(
+                                text = { Text(type.name.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }) },
+                                onClick = {
+                                    showAddSubMenu = false
+                                    onMaskTapModeChange(MaskTapMode.None)
+                                    val newSubId = java.util.UUID.randomUUID().toString()
+                                    val updated = masks.map { m ->
+                                        if (m.id != selectedMask.id) m
+                                        else m.copy(subMasks = m.subMasks + newSubMaskState(newSubId, SubMaskMode.Additive, type))
+                                    }
+                                    onMasksChange(updated)
+                                    onSelectedSubMaskIdChange(newSubId)
+                                    onPaintingMaskChange(type == SubMaskType.Brush)
+                                }
+                            )
                         }
-                        onMasksChange(updated)
-                        onSelectedSubMaskIdChange(newSubId)
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Add +") }
-                FilledTonalButton(
-                    onClick = {
-                        val newSubId = java.util.UUID.randomUUID().toString()
-                        val updated = masks.map { m ->
-                            if (m.id != selectedMask.id) m
-                            else m.copy(subMasks = m.subMasks + SubMaskState(id = newSubId, mode = SubMaskMode.Subtractive))
+                    }
+                }
+
+                Box(modifier = Modifier.weight(1f)) {
+                    FilledTonalButton(
+                        onClick = { showSubSubMenu = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Subtract -") }
+                    DropdownMenu(
+                        expanded = showSubSubMenu,
+                        onDismissRequest = { showSubSubMenu = false }
+                    ) {
+                        listOf(SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
+                            DropdownMenuItem(
+                                text = { Text(type.name.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }) },
+                                onClick = {
+                                    showSubSubMenu = false
+                                    onMaskTapModeChange(MaskTapMode.None)
+                                    val newSubId = java.util.UUID.randomUUID().toString()
+                                    val updated = masks.map { m ->
+                                        if (m.id != selectedMask.id) m
+                                        else m.copy(subMasks = m.subMasks + newSubMaskState(newSubId, SubMaskMode.Subtractive, type))
+                                    }
+                                    onMasksChange(updated)
+                                    onSelectedSubMaskIdChange(newSubId)
+                                    onPaintingMaskChange(type == SubMaskType.Brush)
+                                }
+                            )
                         }
-                        onMasksChange(updated)
-                        onSelectedSubMaskIdChange(newSubId)
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Subtract -") }
+                    }
+                }
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1698,10 +2310,24 @@ private fun TabbedEditorControls(
                                 }
                             )
                             Text(
-                                text = if (sub.mode == SubMaskMode.Additive) "Add" else "Subtract",
+                                text = buildString {
+                                    append(if (sub.mode == SubMaskMode.Additive) "Add" else "Subtract")
+                                    append(" ")
+                                    append(
+                                        when (sub.type) {
+                                            SubMaskType.Linear.id -> "Gradient"
+                                            SubMaskType.Radial.id -> "Radial"
+                                            else -> "Brush"
+                                        }
+                                    )
+                                },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .clickable { onSelectedSubMaskIdChange(sub.id) },
+                                    .clickable {
+                                        onMaskTapModeChange(MaskTapMode.None)
+                                        onSelectedSubMaskIdChange(sub.id)
+                                        onPaintingMaskChange(sub.type == SubMaskType.Brush.id)
+                                    },
                                 color = MaterialTheme.colorScheme.onSurface,
                                 fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                             )
@@ -1728,14 +2354,26 @@ private fun TabbedEditorControls(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Paint", color = MaterialTheme.colorScheme.onSurface)
-                Checkbox(
-                    checked = isPaintingMask,
-                    onCheckedChange = { checked ->
-                        onPaintingMaskChange(checked)
-                        if (checked) onShowMaskOverlayChange(true)
-                    }
-                )
+                if (selectedSubMask?.type == SubMaskType.Brush.id) {
+                    Text("Paint", color = MaterialTheme.colorScheme.onSurface)
+                    Checkbox(
+                        checked = isPaintingMask,
+                        onCheckedChange = { checked ->
+                            onMaskTapModeChange(MaskTapMode.None)
+                            onPaintingMaskChange(checked)
+                            if (checked) onShowMaskOverlayChange(true)
+                        }
+                    )
+                } else {
+                    Text(
+                        text = when (selectedSubMask?.type) {
+                            SubMaskType.Linear.id -> "Gradient"
+                            SubMaskType.Radial.id -> "Radial"
+                            else -> "Mask"
+                        },
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
 
             Row(
@@ -1760,12 +2398,119 @@ private fun TabbedEditorControls(
                 return
             }
 
-            Text("Brush Size: ${brushSize.roundToInt()} px", color = MaterialTheme.colorScheme.onSurface)
-            Slider(
-                value = brushSize.coerceIn(2f, 400f),
-                onValueChange = { onBrushSizeChange(it) },
-                valueRange = 2f..400f
-            )
+            if (maskTapMode != MaskTapMode.None) {
+                Text(
+                    text = when (maskTapMode) {
+                        MaskTapMode.SetRadialCenter -> "Tap the image to set radial center"
+                        MaskTapMode.SetLinearStart -> "Tap the image to set gradient start"
+                        MaskTapMode.SetLinearEnd -> "Tap the image to set gradient end"
+                        MaskTapMode.None -> ""
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                FilledTonalButton(
+                    onClick = { onMaskTapModeChange(MaskTapMode.None) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Cancel") }
+            }
+
+            when (selectedSubMask.type) {
+                SubMaskType.Brush.id -> {
+                    Text("Brush Size: ${brushSize.roundToInt()} px", color = MaterialTheme.colorScheme.onSurface)
+                    Slider(
+                        value = brushSize.coerceIn(2f, 400f),
+                        onValueChange = { onBrushSizeChange(it) },
+                        valueRange = 2f..400f
+                    )
+                }
+
+                SubMaskType.Radial.id -> {
+                    FilledTonalButton(
+                        onClick = {
+                            onPaintingMaskChange(false)
+                            onMaskTapModeChange(MaskTapMode.SetRadialCenter)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Set Center (Tap Image)") }
+
+                    Text("Radius: ${(selectedSubMask.radial.radiusX * 100f).roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
+                    Slider(
+                        value = selectedSubMask.radial.radiusX.coerceIn(0.01f, 1.5f),
+                        onValueChange = { newValue ->
+                            val updated = masks.map { m ->
+                                if (m.id != selectedMask.id) m
+                                else m.copy(
+                                    subMasks = m.subMasks.map { s ->
+                                        if (s.id != selectedSubMask.id) s
+                                        else s.copy(radial = s.radial.copy(radiusX = newValue, radiusY = newValue))
+                                    }
+                                )
+                            }
+                            onMasksChange(updated)
+                        },
+                        valueRange = 0.01f..1.5f
+                    )
+
+                    Text("Feather: ${(selectedSubMask.radial.feather * 100f).roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
+                    Slider(
+                        value = selectedSubMask.radial.feather.coerceIn(0f, 1f),
+                        onValueChange = { newValue ->
+                            val updated = masks.map { m ->
+                                if (m.id != selectedMask.id) m
+                                else m.copy(
+                                    subMasks = m.subMasks.map { s ->
+                                        if (s.id != selectedSubMask.id) s
+                                        else s.copy(radial = s.radial.copy(feather = newValue))
+                                    }
+                                )
+                            }
+                            onMasksChange(updated)
+                        },
+                        valueRange = 0f..1f
+                    )
+                }
+
+                SubMaskType.Linear.id -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = {
+                                onPaintingMaskChange(false)
+                                onMaskTapModeChange(MaskTapMode.SetLinearStart)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Set Start") }
+                        FilledTonalButton(
+                            onClick = {
+                                onPaintingMaskChange(false)
+                                onMaskTapModeChange(MaskTapMode.SetLinearEnd)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Set End") }
+                    }
+
+                    Text("Range: ${(selectedSubMask.linear.range * 100f).roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
+                    Slider(
+                        value = selectedSubMask.linear.range.coerceIn(0.01f, 1.5f),
+                        onValueChange = { newValue ->
+                            val updated = masks.map { m ->
+                                if (m.id != selectedMask.id) m
+                                else m.copy(
+                                    subMasks = m.subMasks.map { s ->
+                                        if (s.id != selectedSubMask.id) s
+                                        else s.copy(linear = s.linear.copy(range = newValue))
+                                    }
+                                )
+                            }
+                            onMasksChange(updated)
+                        },
+                        valueRange = 0.01f..1.5f
+                    )
+                }
+            }
 
             Text(
                 text = "Mask Adjustments",
@@ -1933,15 +2678,667 @@ private fun snapToStep(
     return (range.start + steps * step).coerceIn(range.start, range.endInclusive)
 }
 
+private data class HistogramData(
+    val red: FloatArray,
+    val green: FloatArray,
+    val blue: FloatArray,
+    val luma: FloatArray
+)
+
+private fun calculateHistogram(bitmap: Bitmap): HistogramData {
+    val w = bitmap.width.coerceAtLeast(1)
+    val h = bitmap.height.coerceAtLeast(1)
+    val pixels = IntArray(w * h)
+    bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+
+    val redCounts = IntArray(256)
+    val greenCounts = IntArray(256)
+    val blueCounts = IntArray(256)
+    val lumaCounts = IntArray(256)
+
+    for (p in pixels) {
+        val r = (p shr 16) and 255
+        val g = (p shr 8) and 255
+        val b = p and 255
+        redCounts[r]++
+        greenCounts[g]++
+        blueCounts[b]++
+        val lumaVal = (0.2126f * r + 0.7152f * g + 0.0722f * b).roundToInt().coerceIn(0, 255)
+        lumaCounts[lumaVal]++
+    }
+
+    val red = FloatArray(256) { idx -> redCounts[idx].toFloat() }
+    val green = FloatArray(256) { idx -> greenCounts[idx].toFloat() }
+    val blue = FloatArray(256) { idx -> blueCounts[idx].toFloat() }
+    val luma = FloatArray(256) { idx -> lumaCounts[idx].toFloat() }
+
+    val sigma = 2.5f
+    applyGaussianSmoothing(red, sigma)
+    applyGaussianSmoothing(green, sigma)
+    applyGaussianSmoothing(blue, sigma)
+    applyGaussianSmoothing(luma, sigma)
+
+    normalizeHistogramRange(red, 0.99f)
+    normalizeHistogramRange(green, 0.99f)
+    normalizeHistogramRange(blue, 0.99f)
+    normalizeHistogramRange(luma, 0.99f)
+
+    return HistogramData(red = red, green = green, blue = blue, luma = luma)
+}
+
+private fun applyGaussianSmoothing(histogram: FloatArray, sigma: Float) {
+    if (sigma <= 0f) return
+    val kernelRadius = kotlin.math.ceil(sigma * 3f).toInt()
+    if (kernelRadius <= 0 || kernelRadius >= histogram.size) return
+
+    val kernelSize = 2 * kernelRadius + 1
+    val kernel = FloatArray(kernelSize)
+    var kernelSum = 0f
+
+    val twoSigmaSq = 2f * sigma * sigma
+    for (i in 0 until kernelSize) {
+        val x = (i - kernelRadius).toFloat()
+        val v = kotlin.math.exp((-x * x / twoSigmaSq).toDouble()).toFloat()
+        kernel[i] = v
+        kernelSum += v
+    }
+
+    if (kernelSum > 0f) {
+        for (i in kernel.indices) {
+            kernel[i] /= kernelSum
+        }
+    }
+
+    val original = histogram.copyOf()
+    val len = histogram.size
+    for (i in 0 until len) {
+        var smoothed = 0f
+        for (k in 0 until kernelSize) {
+            val offset = k - kernelRadius
+            val sampleIndex = (i + offset).coerceIn(0, len - 1)
+            smoothed += original[sampleIndex] * kernel[k]
+        }
+        histogram[i] = smoothed
+    }
+}
+
+private fun normalizeHistogramRange(histogram: FloatArray, percentileClip: Float) {
+    if (histogram.isEmpty()) return
+    val sorted = histogram.copyOf()
+    sorted.sort()
+    val clipIndex = ((sorted.size - 1) * percentileClip).roundToInt().coerceIn(0, sorted.size - 1)
+    val maxVal = sorted[clipIndex]
+
+    if (maxVal > 1e-6f) {
+        val scale = 1f / maxVal
+        for (i in histogram.indices) {
+            histogram[i] = (histogram[i] * scale).coerceAtMost(1f)
+        }
+    } else {
+        for (i in histogram.indices) {
+            histogram[i] = 0f
+        }
+    }
+}
+
+private enum class CurveChannel(val label: String) {
+    Luma("L"),
+    Red("R"),
+    Green("G"),
+    Blue("B"),
+}
+
+private fun CurvesState.pointsFor(channel: CurveChannel): List<CurvePointState> {
+    return when (channel) {
+        CurveChannel.Luma -> luma
+        CurveChannel.Red -> red
+        CurveChannel.Green -> green
+        CurveChannel.Blue -> blue
+    }
+}
+
+private fun CurvesState.withPoints(channel: CurveChannel, points: List<CurvePointState>): CurvesState {
+    return when (channel) {
+        CurveChannel.Luma -> copy(luma = points)
+        CurveChannel.Red -> copy(red = points)
+        CurveChannel.Green -> copy(green = points)
+        CurveChannel.Blue -> copy(blue = points)
+    }
+}
+
+@Composable
+private fun CurvesEditor(
+    adjustments: AdjustmentState,
+    histogramData: HistogramData?,
+    onAdjustmentsChange: (AdjustmentState) -> Unit
+) {
+    var activeChannel by remember { mutableStateOf(CurveChannel.Luma) }
+    val points = adjustments.curves.pointsFor(activeChannel)
+
+    val latestAdjustments by rememberUpdatedState(adjustments)
+    val latestOnAdjustmentsChange by rememberUpdatedState(onAdjustmentsChange)
+    val latestCurves by rememberUpdatedState(adjustments.curves)
+    val latestPoints by rememberUpdatedState(points)
+
+    val channelColor = when (activeChannel) {
+        CurveChannel.Luma -> MaterialTheme.colorScheme.primary
+        CurveChannel.Red -> Color(0xFFFF6B6B)
+        CurveChannel.Green -> Color(0xFF6BCB77)
+        CurveChannel.Blue -> Color(0xFF4D96FF)
+    }
+
+    val histogram = when (activeChannel) {
+        CurveChannel.Luma -> histogramData?.luma
+        CurveChannel.Red -> histogramData?.red
+        CurveChannel.Green -> histogramData?.green
+        CurveChannel.Blue -> histogramData?.blue
+    }
+
+    val pointHitRadiusPx = with(LocalDensity.current) { 14.dp.toPx() }
+    val gridColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+    val resetChannel: () -> Unit = {
+        val updatedCurves = latestCurves.withPoints(activeChannel, defaultCurvePoints())
+        latestOnAdjustmentsChange(latestAdjustments.copy(curves = updatedCurves))
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            CurveChannel.values().forEach { channel ->
+                val selected = channel == activeChannel
+                FilledTonalButton(
+                    onClick = { activeChannel = channel },
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+                        else MaterialTheme.colorScheme.onSurface
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(channel.label)
+                }
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = resetChannel) {
+                Text("Reset ${activeChannel.label}")
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .pointerInput(activeChannel, pointHitRadiusPx) {
+                    fun toCurvePoint(pos: Offset): CurvePointState {
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        val h = size.height.toFloat().coerceAtLeast(1f)
+                        val x = (pos.x / w * 255f).coerceIn(0f, 255f)
+                        val y = (255f - (pos.y / h * 255f)).coerceIn(0f, 255f)
+                        return CurvePointState(x = x, y = y)
+                    }
+
+                    fun toScreenPoint(p: CurvePointState): Offset {
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        val h = size.height.toFloat().coerceAtLeast(1f)
+                        val x = p.x / 255f * w
+                        val y = (255f - p.y) / 255f * h
+                        return Offset(x, y)
+                    }
+
+                    fun closestPointIndex(pos: Offset, pts: List<CurvePointState>): Int? {
+                        var best: Int? = null
+                        var bestDist = Float.MAX_VALUE
+                        pts.forEachIndexed { index, p ->
+                            val sp = toScreenPoint(p)
+                            val dx = sp.x - pos.x
+                            val dy = sp.y - pos.y
+                            val d = dx * dx + dy * dy
+                            if (d < bestDist) {
+                                bestDist = d
+                                best = index
+                            }
+                        }
+                        return if (best != null && kotlin.math.sqrt(bestDist) <= pointHitRadiusPx) best else null
+                    }
+
+                    fun movePoint(
+                        pts: List<CurvePointState>,
+                        index: Int,
+                        target: CurvePointState
+                    ): List<CurvePointState> {
+                        val clampedY = target.y.coerceIn(0f, 255f)
+                        val isEndPoint = index == 0 || index == pts.lastIndex
+                        val clampedX = if (isEndPoint) {
+                            pts[index].x
+                        } else {
+                            val prevX = pts[index - 1].x
+                            val nextX = pts[index + 1].x
+                            target.x.coerceIn(prevX + 0.01f, nextX - 0.01f)
+                        }
+                        val out = pts.toMutableList()
+                        out[index] = CurvePointState(x = clampedX, y = clampedY)
+                        return out
+                    }
+
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        var working = latestPoints
+                        val downPos = down.position
+                        var draggingIndex = closestPointIndex(downPos, working)
+
+                        if (draggingIndex == null) {
+                            // Don't add points on scroll: only add on a real tap (no movement beyond slop).
+                            val slop = viewConfiguration.touchSlop
+                            var movedTooMuch = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                                if (!change.pressed) {
+                                    if (!movedTooMuch) {
+                                        if (working.size >= 16) return@awaitEachGesture
+                                        val newPoint = toCurvePoint(change.position)
+                                        val newPoints = (working + newPoint).sortedBy { it.x }
+                                        working = newPoints
+                                        val updatedCurves = latestCurves.withPoints(activeChannel, working)
+                                        latestOnAdjustmentsChange(latestAdjustments.copy(curves = updatedCurves))
+                                    }
+                                    return@awaitEachGesture
+                                }
+                                val dx = change.position.x - downPos.x
+                                val dy = change.position.y - downPos.y
+                                if ((dx * dx + dy * dy) > slop * slop) {
+                                    movedTooMuch = true
+                                }
+                            }
+                        }
+
+                        if (draggingIndex == null) return@awaitEachGesture
+
+                        // User grabbed a point: capture the gesture so scrolling doesn't steal it.
+                        down.consume()
+
+                        drag(down.id) { change ->
+                            change.consume()
+                            val target = toCurvePoint(change.position)
+                            working = movePoint(working, draggingIndex!!, target)
+                            val updatedCurves = latestCurves.withPoints(activeChannel, working)
+                            latestOnAdjustmentsChange(latestAdjustments.copy(curves = updatedCurves))
+                        }
+                    }
+                }
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val w = size.width
+                val h = size.height
+
+                // Grid (4x4)
+                for (i in 1..3) {
+                    val t = i / 4f
+                    drawLine(
+                        color = gridColor,
+                        start = Offset(w * t, 0f),
+                        end = Offset(w * t, h),
+                        strokeWidth = 1f
+                    )
+                    drawLine(
+                        color = gridColor,
+                        start = Offset(0f, h * t),
+                        end = Offset(w, h * t),
+                        strokeWidth = 1f
+                    )
+                }
+
+                // Histogram backdrop
+                histogram?.let { data ->
+                    val maxVal = data.maxOrNull() ?: 0f
+                    if (maxVal > 0f) {
+                        val path = Path().apply {
+                            moveTo(0f, h)
+                            for (i in data.indices) {
+                                val x = (i / 255f) * w
+                                val y = (data[i] / maxVal) * h
+                                lineTo(x, h - y)
+                            }
+                            lineTo(w, h)
+                            close()
+                        }
+                        drawPath(path, color = channelColor.copy(alpha = 0.18f))
+                    }
+                }
+
+                // Curve
+                if (points.size >= 2) {
+                    val curvePath = buildCurvePath(points, size)
+                    drawPath(curvePath, color = channelColor, style = Stroke(width = 3f))
+                }
+
+                // Points
+                points.forEach { p ->
+                    val x = p.x / 255f * w
+                    val y = (255f - p.y) / 255f * h
+                    drawCircle(
+                        color = Color.White,
+                        radius = 8f,
+                        center = Offset(x, y)
+                    )
+                    drawCircle(
+                        color = Color.Black.copy(alpha = 0.25f),
+                        radius = 8f,
+                        center = Offset(x, y),
+                        style = Stroke(width = 2f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun buildCurvePath(points: List<CurvePointState>, size: Size): Path {
+    if (points.size < 2) return Path()
+
+    val pts = points.sortedBy { it.x }
+    val n = pts.size
+    val deltas = FloatArray(n - 1)
+    for (i in 0 until n - 1) {
+        val dx = pts[i + 1].x - pts[i].x
+        val dy = pts[i + 1].y - pts[i].y
+        deltas[i] = if (dx == 0f) {
+            when {
+                dy > 0f -> 1e6f
+                dy < 0f -> -1e6f
+                else -> 0f
+            }
+        } else {
+            dy / dx
+        }
+    }
+
+    val ms = FloatArray(n)
+    ms[0] = deltas[0]
+    for (i in 1 until n - 1) {
+        ms[i] = if (deltas[i - 1] * deltas[i] <= 0f) 0f else (deltas[i - 1] + deltas[i]) / 2f
+    }
+    ms[n - 1] = deltas[n - 2]
+
+    for (i in 0 until n - 1) {
+        if (deltas[i] == 0f) {
+            ms[i] = 0f
+            ms[i + 1] = 0f
+        } else {
+            val alpha = ms[i] / deltas[i]
+            val beta = ms[i + 1] / deltas[i]
+            val tau = alpha * alpha + beta * beta
+            if (tau > 9f) {
+                val scale = 3f / kotlin.math.sqrt(tau)
+                ms[i] = scale * alpha * deltas[i]
+                ms[i + 1] = scale * beta * deltas[i]
+            }
+        }
+    }
+
+    fun map(p: CurvePointState): Offset {
+        val x = (p.x / 255f) * size.width
+        val y = ((255f - p.y) / 255f) * size.height
+        return Offset(x, y)
+    }
+
+    fun mapXY(x: Float, y: Float): Offset {
+        val px = (x / 255f) * size.width
+        val py = ((255f - y) / 255f) * size.height
+        return Offset(px, py)
+    }
+
+    val path = Path()
+    val first = pts.first()
+    path.moveTo(map(first).x, map(first).y)
+    for (i in 0 until n - 1) {
+        val p0 = pts[i]
+        val p1 = pts[i + 1]
+        val m0 = ms[i]
+        val m1 = ms[i + 1]
+        val dx = p1.x - p0.x
+
+        val cp1x = p0.x + dx / 3f
+        val cp1y = p0.y + (m0 * dx) / 3f
+        val cp2x = p1.x - dx / 3f
+        val cp2y = p1.y - (m1 * dx) / 3f
+
+        val cp1 = mapXY(cp1x, cp1y)
+        val cp2 = mapXY(cp2x, cp2y)
+        val end = map(p1)
+        path.cubicTo(cp1.x, cp1.y, cp2.x, cp2.y, end.x, end.y)
+    }
+    return path
+}
+
+@Composable
+private fun ColorGradingEditor(
+    colorGrading: ColorGradingState,
+    onColorGradingChange: (ColorGradingState) -> Unit
+) {
+    val formatterInt: (Float) -> String = { it.roundToInt().toString() }
+
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            Box(modifier = Modifier.fillMaxWidth(0.6f)) {
+                ColorWheelControl(
+                    label = "Midtones",
+                    value = colorGrading.midtones,
+                    defaultValue = HueSatLumState(),
+                    onValueChange = { onColorGradingChange(colorGrading.copy(midtones = it)) }
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                ColorWheelControl(
+                    label = "Shadows",
+                    value = colorGrading.shadows,
+                    defaultValue = HueSatLumState(),
+                    onValueChange = { onColorGradingChange(colorGrading.copy(shadows = it)) }
+                )
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                ColorWheelControl(
+                    label = "Highlights",
+                    value = colorGrading.highlights,
+                    defaultValue = HueSatLumState(),
+                    onValueChange = { onColorGradingChange(colorGrading.copy(highlights = it)) }
+                )
+            }
+        }
+
+        AdjustmentSlider(
+            label = "Blending",
+            value = colorGrading.blending,
+            range = 0f..100f,
+            step = 1f,
+            defaultValue = 50f,
+            formatter = formatterInt,
+            onValueChange = { onColorGradingChange(colorGrading.copy(blending = it)) }
+        )
+        AdjustmentSlider(
+            label = "Balance",
+            value = colorGrading.balance,
+            range = -100f..100f,
+            step = 1f,
+            defaultValue = 0f,
+            formatter = formatterInt,
+            onValueChange = { onColorGradingChange(colorGrading.copy(balance = it)) }
+        )
+    }
+}
+
+@Composable
+private fun ColorWheelControl(
+    label: String,
+    value: HueSatLumState,
+    defaultValue: HueSatLumState,
+    onValueChange: (HueSatLumState) -> Unit
+) {
+    val formatterInt: (Float) -> String = { it.roundToInt().toString() }
+    val latestValue by rememberUpdatedState(value)
+    val latestOnValueChange by rememberUpdatedState(onValueChange)
+    val handleHitRadiusPx = with(LocalDensity.current) { 22.dp.toPx() }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .pointerInput(label) {
+                    detectTapGestures(onDoubleTap = { onValueChange(defaultValue) })
+                },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
+            Text(
+                text = "H ${value.hue.roundToInt()}  S ${value.saturation.roundToInt()}",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .pointerInput(Unit) {
+                    fun calcHueSat(pos: Offset): HueSatLumState {
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        val h = size.height.toFloat().coerceAtLeast(1f)
+                        val cx = w / 2f
+                        val cy = h / 2f
+                        val dx = pos.x - cx
+                        val dy = pos.y - cy
+                        val radius = kotlin.math.sqrt(dx * dx + dy * dy)
+                        val maxRadius = kotlin.math.min(cx, cy).coerceAtLeast(1f)
+                        val sat = ((radius / maxRadius).coerceIn(0f, 1f) * 100f)
+                        var hue = (kotlin.math.atan2(dy, dx) * 180.0 / kotlin.math.PI).toFloat()
+                        if (hue < 0f) hue += 360f
+                        return latestValue.copy(hue = hue, saturation = sat)
+                    }
+
+                    fun handleOffsetFor(v: HueSatLumState): Offset {
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        val h = size.height.toFloat().coerceAtLeast(1f)
+                        val cx = w / 2f
+                        val cy = h / 2f
+                        val radius = kotlin.math.min(cx, cy)
+                        val angleRad = (v.hue / 180f) * kotlin.math.PI.toFloat()
+                        val satNorm = (v.saturation / 100f).coerceIn(0f, 1f)
+                        val x = cx + kotlin.math.cos(angleRad) * radius * satNorm
+                        val y = cy + kotlin.math.sin(angleRad) * radius * satNorm
+                        return Offset(x, y)
+                    }
+
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val downPos = down.position
+                        val slop = viewConfiguration.touchSlop
+
+                        val handlePos = handleOffsetFor(latestValue)
+                        val dist = (handlePos - downPos).getDistance()
+
+                        if (dist <= handleHitRadiusPx) {
+                            // Dragging the handle: capture (prevents scroll stealing the gesture).
+                            down.consume()
+                            drag(down.id) { change ->
+                                change.consume()
+                                latestOnValueChange(calcHueSat(change.position))
+                            }
+                        } else {
+                            // Only update on a real tap (no movement beyond slop); ignore scroll swipes.
+                            var movedTooMuch = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                                if (!change.pressed) {
+                                    if (!movedTooMuch) {
+                                        latestOnValueChange(calcHueSat(change.position))
+                                    }
+                                    break
+                                }
+                                val dx = change.position.x - downPos.x
+                                val dy = change.position.y - downPos.y
+                                if ((dx * dx + dy * dy) > slop * slop) {
+                                    movedTooMuch = true
+                                }
+                            }
+                        }
+                    }
+                }
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val w = size.width
+                val h = size.height
+                val center = Offset(w / 2f, h / 2f)
+                val radius = kotlin.math.min(w, h) / 2f
+
+                val sweep = listOf(
+                    Color.Red,
+                    Color.Yellow,
+                    Color.Green,
+                    Color.Cyan,
+                    Color.Blue,
+                    Color.Magenta,
+                    Color.Red
+                )
+
+                drawCircle(brush = Brush.sweepGradient(sweep), radius = radius, center = center)
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(Color.White, Color.Transparent),
+                        center = center,
+                        radius = radius
+                    ),
+                    radius = radius,
+                    center = center
+                )
+                drawCircle(color = Color.Black.copy(alpha = 0.15f), radius = radius, center = center, style = Stroke(2f))
+
+                val angleRad = (value.hue / 180f) * kotlin.math.PI.toFloat()
+                val satNorm = (value.saturation / 100f).coerceIn(0f, 1f)
+                val px = center.x + kotlin.math.cos(angleRad) * radius * satNorm
+                val py = center.y + kotlin.math.sin(angleRad) * radius * satNorm
+                val pointerColor = if (value.saturation > 5f) Color.hsv(value.hue, satNorm, 1f) else Color.Transparent
+
+                drawCircle(color = pointerColor, radius = 10f, center = Offset(px, py))
+                drawCircle(color = Color.White, radius = 10f, center = Offset(px, py), style = Stroke(3f))
+            }
+        }
+
+        AdjustmentSlider(
+            label = "Luminance",
+            value = value.luminance,
+            range = -100f..100f,
+            step = 1f,
+            defaultValue = 0f,
+            formatter = formatterInt,
+            onValueChange = { onValueChange(value.copy(luminance = it)) }
+        )
+    }
+}
+
 @Composable
 private fun ImagePreview(
     bitmap: Bitmap?,
     isLoading: Boolean,
     maskOverlay: MaskState? = null,
+    activeSubMask: SubMaskState? = null,
     isMaskMode: Boolean = false,
     showMaskOverlay: Boolean = true,
     isPainting: Boolean = false,
     brushSize: Float = 60f,
+    maskTapMode: MaskTapMode = MaskTapMode.None,
+    onMaskTap: ((MaskPoint) -> Unit)? = null,
     onBrushStrokeFinished: ((List<MaskPoint>, Float) -> Unit)? = null
 ) {
     var scale by remember { mutableStateOf(1f) }
@@ -2022,6 +3419,54 @@ private fun ImagePreview(
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                if (activeSubMask != null) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val maxX = (bmpW - 1f).coerceAtLeast(1f)
+                        val maxY = (bmpH - 1f).coerceAtLeast(1f)
+                        fun toDisplayOffset(p: MaskPoint): Offset {
+                            val px = if (p.x <= 1.5f) p.x * maxX else p.x
+                            val py = if (p.y <= 1.5f) p.y * maxY else p.y
+                            return Offset(left + px * baseScale, top + py * baseScale)
+                        }
+
+                        val strokeColor = Color(0xCCFFFFFF)
+                        val handleRadius = 7.dp.toPx()
+
+                        when (activeSubMask.type) {
+                            SubMaskType.Linear.id -> {
+                                val start = toDisplayOffset(MaskPoint(activeSubMask.linear.startX, activeSubMask.linear.startY))
+                                val end = toDisplayOffset(MaskPoint(activeSubMask.linear.endX, activeSubMask.linear.endY))
+                                drawLine(color = strokeColor, start = start, end = end, strokeWidth = 2.dp.toPx())
+                                drawCircle(color = strokeColor, radius = handleRadius, center = start)
+                                drawCircle(color = strokeColor, radius = handleRadius, center = end)
+                            }
+
+                            SubMaskType.Radial.id -> {
+                                val center = toDisplayOffset(MaskPoint(activeSubMask.radial.centerX, activeSubMask.radial.centerY))
+                                val radiusPx = run {
+                                    val base = minOf(bmpW, bmpH)
+                                    val r = if (activeSubMask.radial.radiusX <= 1.5f) activeSubMask.radial.radiusX * base else activeSubMask.radial.radiusX
+                                    r * baseScale
+                                }
+                                drawCircle(color = strokeColor, radius = radiusPx, center = center, style = Stroke(width = 2.dp.toPx()))
+                                drawCircle(color = strokeColor, radius = handleRadius, center = center)
+                            }
+                        }
+                    }
+                }
+
+                if (onMaskTap != null && maskTapMode != MaskTapMode.None && !isPainting) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(maskTapMode, bitmap) {
+                                detectTapGestures { pos ->
+                                    onMaskTap(toImagePoint(pos))
+                                }
+                            }
                     )
                 }
 

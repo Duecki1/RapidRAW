@@ -12,13 +12,16 @@ use image::{
     Rgba,
 };
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jbyteArray, jlong};
+use jni::sys::{jbyteArray, jlong, jstring};
 use jni::JNIEnv;
 use log::error;
 #[cfg(target_os = "android")]
 use log::Level;
 use raw_processing::develop_raw_image;
+use rawler::decoders::RawDecodeParams;
+use rawler::rawsource::RawSource;
 use serde::Deserialize;
+use serde_json::json;
 use serde_json::from_str;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -50,6 +53,47 @@ struct AdjustmentValues {
     chromatic_aberration_red_cyan: f32,
     chromatic_aberration_blue_yellow: f32,
     tone_mapper: ToneMapper,
+    color_grading: ColorGradingValues,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ColorGradeSettings {
+    hue: f32,
+    saturation: f32,
+    luminance: f32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ColorGradingValues {
+    shadows: ColorGradeSettings,
+    midtones: ColorGradeSettings,
+    highlights: ColorGradeSettings,
+    blending: f32,
+    balance: f32,
+}
+
+impl ColorGradingValues {
+    fn normalized(self) -> Self {
+        Self {
+            shadows: ColorGradeSettings {
+                hue: self.shadows.hue,
+                saturation: self.shadows.saturation / 500.0,
+                luminance: self.shadows.luminance / 500.0,
+            },
+            midtones: ColorGradeSettings {
+                hue: self.midtones.hue,
+                saturation: self.midtones.saturation / 500.0,
+                luminance: self.midtones.luminance / 500.0,
+            },
+            highlights: ColorGradeSettings {
+                hue: self.highlights.hue,
+                saturation: self.highlights.saturation / 500.0,
+                luminance: self.highlights.luminance / 500.0,
+            },
+            blending: self.blending / 100.0,
+            balance: self.balance / 200.0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, Debug, Deserialize)]
@@ -138,6 +182,7 @@ impl AdjustmentValues {
             chromatic_aberration_red_cyan: scale(self.chromatic_aberration_red_cyan, scales.chromatic_aberration_red_cyan),
             chromatic_aberration_blue_yellow: scale(self.chromatic_aberration_blue_yellow, scales.chromatic_aberration_blue_yellow),
             tone_mapper: self.tone_mapper,
+            color_grading: self.color_grading.normalized(),
         }
     }
 }
@@ -164,6 +209,17 @@ impl AddAssign for AdjustmentValues {
         self.color_noise_reduction += rhs.color_noise_reduction;
         self.chromatic_aberration_red_cyan += rhs.chromatic_aberration_red_cyan;
         self.chromatic_aberration_blue_yellow += rhs.chromatic_aberration_blue_yellow;
+        self.color_grading.shadows.hue += rhs.color_grading.shadows.hue;
+        self.color_grading.shadows.saturation += rhs.color_grading.shadows.saturation;
+        self.color_grading.shadows.luminance += rhs.color_grading.shadows.luminance;
+        self.color_grading.midtones.hue += rhs.color_grading.midtones.hue;
+        self.color_grading.midtones.saturation += rhs.color_grading.midtones.saturation;
+        self.color_grading.midtones.luminance += rhs.color_grading.midtones.luminance;
+        self.color_grading.highlights.hue += rhs.color_grading.highlights.hue;
+        self.color_grading.highlights.saturation += rhs.color_grading.highlights.saturation;
+        self.color_grading.highlights.luminance += rhs.color_grading.highlights.luminance;
+        self.color_grading.blending += rhs.color_grading.blending;
+        self.color_grading.balance += rhs.color_grading.balance;
     }
 }
 
@@ -226,6 +282,10 @@ struct MaskAdjustmentsPayload {
     color_noise_reduction: f32,
     chromatic_aberration_red_cyan: f32,
     chromatic_aberration_blue_yellow: f32,
+    #[serde(default)]
+    curves: CurvesPayload,
+    #[serde(default)]
+    color_grading: ColorGradingPayload,
 }
 
 impl MaskAdjustmentsPayload {
@@ -251,6 +311,7 @@ impl MaskAdjustmentsPayload {
             color_noise_reduction: self.color_noise_reduction,
             chromatic_aberration_red_cyan: self.chromatic_aberration_red_cyan,
             chromatic_aberration_blue_yellow: self.chromatic_aberration_blue_yellow,
+            color_grading: self.color_grading.to_values(),
             ..Default::default()
         }
     }
@@ -308,6 +369,32 @@ struct BrushMaskParameters {
     lines: Vec<BrushLinePayload>,
 }
 
+fn default_linear_range() -> f32 {
+    0.25
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct RadialMaskParameters {
+    center_x: f32,
+    center_y: f32,
+    radius_x: f32,
+    radius_y: f32,
+    rotation: f32,
+    feather: f32,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct LinearMaskParameters {
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    #[serde(default = "default_linear_range")]
+    range: f32,
+}
+
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct MaskDefinitionPayload {
@@ -320,6 +407,96 @@ struct MaskDefinitionPayload {
     adjustments: MaskAdjustmentsPayload,
     #[serde(rename = "subMasks")]
     sub_masks: Vec<SubMaskPayload>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+struct CurvePointPayload {
+    x: f32,
+    y: f32,
+}
+
+fn default_curve_points() -> Vec<CurvePointPayload> {
+    vec![
+        CurvePointPayload { x: 0.0, y: 0.0 },
+        CurvePointPayload {
+            x: 255.0,
+            y: 255.0,
+        },
+    ]
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+struct CurvesPayload {
+    luma: Vec<CurvePointPayload>,
+    red: Vec<CurvePointPayload>,
+    green: Vec<CurvePointPayload>,
+    blue: Vec<CurvePointPayload>,
+}
+
+impl Default for CurvesPayload {
+    fn default() -> Self {
+        Self {
+            luma: default_curve_points(),
+            red: default_curve_points(),
+            green: default_curve_points(),
+            blue: default_curve_points(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct HueSatLumPayload {
+    hue: f32,
+    saturation: f32,
+    luminance: f32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ColorGradingPayload {
+    shadows: HueSatLumPayload,
+    midtones: HueSatLumPayload,
+    highlights: HueSatLumPayload,
+    blending: f32,
+    balance: f32,
+}
+
+impl Default for ColorGradingPayload {
+    fn default() -> Self {
+        Self {
+            shadows: HueSatLumPayload::default(),
+            midtones: HueSatLumPayload::default(),
+            highlights: HueSatLumPayload::default(),
+            blending: 50.0,
+            balance: 0.0,
+        }
+    }
+}
+
+impl ColorGradingPayload {
+    fn to_values(&self) -> ColorGradingValues {
+        ColorGradingValues {
+            shadows: ColorGradeSettings {
+                hue: self.shadows.hue,
+                saturation: self.shadows.saturation,
+                luminance: self.shadows.luminance,
+            },
+            midtones: ColorGradeSettings {
+                hue: self.midtones.hue,
+                saturation: self.midtones.saturation,
+                luminance: self.midtones.luminance,
+            },
+            highlights: ColorGradeSettings {
+                hue: self.highlights.hue,
+                saturation: self.highlights.saturation,
+                luminance: self.highlights.luminance,
+            },
+            blending: self.blending,
+            balance: self.balance,
+        }
+    }
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -347,6 +524,10 @@ struct AdjustmentsPayload {
     chromatic_aberration_blue_yellow: f32,
     #[serde(default)]
     tone_mapper: ToneMapper,
+    #[serde(default)]
+    curves: CurvesPayload,
+    #[serde(default)]
+    color_grading: ColorGradingPayload,
     masks: Vec<Value>,
 }
 
@@ -374,7 +555,208 @@ impl AdjustmentsPayload {
             chromatic_aberration_red_cyan: self.chromatic_aberration_red_cyan,
             chromatic_aberration_blue_yellow: self.chromatic_aberration_blue_yellow,
             tone_mapper: self.tone_mapper,
+            color_grading: self.color_grading.to_values(),
         }
+    }
+}
+
+#[derive(Clone)]
+struct CurvePoint {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone)]
+struct CurveSegment {
+    p1: CurvePoint,
+    p2: CurvePoint,
+    m1: f32,
+    m2: f32,
+}
+
+#[derive(Clone)]
+struct CurveRuntime {
+    points: Vec<CurvePoint>,
+    segments: Vec<CurveSegment>,
+}
+
+impl CurveRuntime {
+    fn from_payload(points: &[CurvePointPayload]) -> Self {
+        let mut pts: Vec<CurvePoint> = points
+            .iter()
+            .map(|p| CurvePoint { x: p.x, y: p.y })
+            .collect();
+
+        if pts.len() < 2 {
+            pts = default_curve_points()
+                .into_iter()
+                .map(|p| CurvePoint { x: p.x, y: p.y })
+                .collect();
+        }
+
+        pts.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        pts.truncate(16);
+
+        let mut segments = Vec::with_capacity(pts.len().saturating_sub(1));
+        for i in 0..pts.len().saturating_sub(1) {
+            let p1 = pts[i].clone();
+            let p2 = pts[i + 1].clone();
+            let p0 = pts[i.saturating_sub(1)].clone();
+            let p3 = pts[(i + 2).min(pts.len() - 1)].clone();
+
+            let delta_before = (p1.y - p0.y) / (p1.x - p0.x).max(0.001);
+            let delta_current = (p2.y - p1.y) / (p2.x - p1.x).max(0.001);
+            let delta_after = (p3.y - p2.y) / (p3.x - p2.x).max(0.001);
+
+            let mut tangent_at_p1 = if i == 0 {
+                delta_current
+            } else if delta_before * delta_current <= 0.0 {
+                0.0
+            } else {
+                (delta_before + delta_current) / 2.0
+            };
+
+            let mut tangent_at_p2 = if i + 1 == pts.len() - 1 {
+                delta_current
+            } else if delta_current * delta_after <= 0.0 {
+                0.0
+            } else {
+                (delta_current + delta_after) / 2.0
+            };
+
+            if delta_current != 0.0 {
+                let alpha = tangent_at_p1 / delta_current;
+                let beta = tangent_at_p2 / delta_current;
+                if alpha * alpha + beta * beta > 9.0 {
+                    let tau = 3.0 / (alpha * alpha + beta * beta).sqrt();
+                    tangent_at_p1 *= tau;
+                    tangent_at_p2 *= tau;
+                }
+            }
+
+            segments.push(CurveSegment {
+                p1,
+                p2,
+                m1: tangent_at_p1,
+                m2: tangent_at_p2,
+            });
+        }
+
+        Self {
+            points: pts,
+            segments,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        if self.points.len() != 2 {
+            return false;
+        }
+        let p0 = &self.points[0];
+        let p1 = &self.points[1];
+        (p0.y - 0.0).abs() < 0.1 && (p1.y - 255.0).abs() < 0.1
+    }
+
+    fn eval(&self, val: f32) -> f32 {
+        if self.points.len() < 2 {
+            return val;
+        }
+
+        let x = val * 255.0;
+        let first = &self.points[0];
+        let last = &self.points[self.points.len() - 1];
+        if x <= first.x {
+            return (first.y / 255.0).clamp(0.0, 1.0);
+        }
+        if x >= last.x {
+            return (last.y / 255.0).clamp(0.0, 1.0);
+        }
+
+        for seg in &self.segments {
+            if x <= seg.p2.x {
+                let dx = seg.p2.x - seg.p1.x;
+                if dx <= 0.0 {
+                    return (seg.p1.y / 255.0).clamp(0.0, 1.0);
+                }
+                let t = (x - seg.p1.x) / dx;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+                let h10 = t3 - 2.0 * t2 + t;
+                let h01 = -2.0 * t3 + 3.0 * t2;
+                let h11 = t3 - t2;
+                let result_y = h00 * seg.p1.y
+                    + h10 * seg.m1 * dx
+                    + h01 * seg.p2.y
+                    + h11 * seg.m2 * dx;
+                return (result_y / 255.0).clamp(0.0, 1.0);
+            }
+        }
+
+        (last.y / 255.0).clamp(0.0, 1.0)
+    }
+}
+
+#[derive(Clone)]
+struct CurvesRuntime {
+    luma: CurveRuntime,
+    red: CurveRuntime,
+    green: CurveRuntime,
+    blue: CurveRuntime,
+    rgb_curves_are_active: bool,
+}
+
+impl CurvesRuntime {
+    fn from_payload(payload: &CurvesPayload) -> Self {
+        let red = CurveRuntime::from_payload(&payload.red);
+        let green = CurveRuntime::from_payload(&payload.green);
+        let blue = CurveRuntime::from_payload(&payload.blue);
+        let rgb_curves_are_active = !red.is_default() || !green.is_default() || !blue.is_default();
+        Self {
+            luma: CurveRuntime::from_payload(&payload.luma),
+            red,
+            green,
+            blue,
+            rgb_curves_are_active,
+        }
+    }
+
+    fn apply_all(&self, color: [f32; 3]) -> [f32; 3] {
+        if self.rgb_curves_are_active {
+            let color_graded = [
+                self.red.eval(color[0]),
+                self.green.eval(color[1]),
+                self.blue.eval(color[2]),
+            ];
+            let luma_initial = get_luma(color);
+            let luma_target = self.luma.eval(luma_initial);
+            let luma_graded = get_luma(color_graded);
+            let mut final_color = if luma_graded > 0.001 {
+                let scale = luma_target / luma_graded;
+                [color_graded[0] * scale, color_graded[1] * scale, color_graded[2] * scale]
+            } else {
+                [luma_target, luma_target, luma_target]
+            };
+            let max_comp = final_color[0].max(final_color[1]).max(final_color[2]);
+            if max_comp > 1.0 {
+                final_color = [
+                    final_color[0] / max_comp,
+                    final_color[1] / max_comp,
+                    final_color[2] / max_comp,
+                ];
+            }
+            final_color
+        } else {
+            [
+                self.luma.eval(color[0]),
+                self.luma.eval(color[1]),
+                self.luma.eval(color[2]),
+            ]
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        self.luma.is_default() && !self.rgb_curves_are_active
     }
 }
 
@@ -412,6 +794,8 @@ struct MaskRuntime {
     opacity_factor: f32,
     invert: bool,
     adjustments: AdjustmentValues,
+    curves: CurvesRuntime,
+    curves_are_active: bool,
     bitmap: Option<Vec<u8>>,
 }
 
@@ -426,11 +810,15 @@ fn parse_masks(values: Vec<Value>, width: u32, height: u32) -> Vec<MaskRuntime> 
                     return None;
                 }
                 let opacity_factor = (def.opacity / 100.0).clamp(0.0, 1.0);
-                let bitmap = Some(generate_brush_mask(&def.sub_masks, width, height));
+                let curves = CurvesRuntime::from_payload(&def.adjustments.curves);
+                let curves_are_active = !curves.is_default();
+                let bitmap = Some(generate_mask_bitmap(&def.sub_masks, width, height));
                 return Some(MaskRuntime {
                     opacity_factor,
                     invert: def.invert,
                     adjustments: def.adjustments.to_values().normalized(&ADJUSTMENT_SCALES),
+                    curves,
+                    curves_are_active,
                     bitmap,
                 });
             }
@@ -445,6 +833,8 @@ fn parse_masks(values: Vec<Value>, width: u32, height: u32) -> Vec<MaskRuntime> 
                     opacity_factor: 1.0,
                     invert: false,
                     adjustments: legacy.to_values().normalized(&ADJUSTMENT_SCALES),
+                    curves: CurvesRuntime::from_payload(&CurvesPayload::default()),
+                    curves_are_active: false,
                     bitmap: None,
                 });
             }
@@ -645,6 +1035,162 @@ fn generate_brush_mask(sub_masks: &[SubMaskPayload], width: u32, height: u32) ->
     mask
 }
 
+fn apply_submask_bitmap(target: &mut [u8], sub_bitmap: &[u8], mode: SubMaskMode) {
+    if target.len() != sub_bitmap.len() {
+        return;
+    }
+    match mode {
+        SubMaskMode::Additive => {
+            for (dst, src) in target.iter_mut().zip(sub_bitmap.iter()) {
+                *dst = (*dst).max(*src);
+            }
+        }
+        SubMaskMode::Subtractive => {
+            for (dst, src) in target.iter_mut().zip(sub_bitmap.iter()) {
+                let current = *dst as f32 / 255.0;
+                let intensity = *src as f32 / 255.0;
+                let next = (current * (1.0 - intensity)).clamp(0.0, 1.0);
+                *dst = (next * 255.0).round() as u8;
+            }
+        }
+    }
+}
+
+fn generate_radial_mask(params_value: &Value, width: u32, height: u32) -> Vec<u8> {
+    let params: RadialMaskParameters = serde_json::from_value(params_value.clone()).unwrap_or_default();
+    let len = (width * height) as usize;
+    let mut mask = vec![0u8; len];
+
+    let w_f = width as f32;
+    let h_f = height as f32;
+    let base_dim = width.min(height) as f32;
+
+    fn denorm(value: f32, max: f32) -> f32 {
+        let max_coord = (max - 1.0).max(1.0);
+        if value <= 1.5 {
+            (value * max_coord).clamp(0.0, max_coord)
+        } else {
+            value
+        }
+    }
+
+    fn denorm_len(value: f32, base_dim: f32) -> f32 {
+        if value <= 1.5 {
+            (value * base_dim).max(0.0)
+        } else {
+            value
+        }
+    }
+
+    let cx = denorm(params.center_x, w_f);
+    let cy = denorm(params.center_y, h_f);
+    let rx = denorm_len(params.radius_x, base_dim).max(0.01);
+    let ry = denorm_len(params.radius_y, base_dim).max(0.01);
+    let feather = params.feather.clamp(0.0, 1.0);
+    let inner_bound = 1.0 - feather;
+
+    let rotation = params.rotation.to_radians();
+    let cos_rot = rotation.cos();
+    let sin_rot = rotation.sin();
+
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+
+            let rot_dx = dx * cos_rot + dy * sin_rot;
+            let rot_dy = -dx * sin_rot + dy * cos_rot;
+
+            let norm_x = rot_dx / rx;
+            let norm_y = rot_dy / ry;
+            let dist = (norm_x * norm_x + norm_y * norm_y).sqrt();
+
+            let intensity = if dist <= inner_bound {
+                1.0
+            } else {
+                1.0 - (dist - inner_bound) / (1.0 - inner_bound).max(0.01)
+            };
+
+            let idx = (y * width + x) as usize;
+            mask[idx] = (intensity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+
+    mask
+}
+
+fn generate_linear_mask(params_value: &Value, width: u32, height: u32) -> Vec<u8> {
+    let params: LinearMaskParameters = serde_json::from_value(params_value.clone()).unwrap_or_default();
+    let len = (width * height) as usize;
+    let mut mask = vec![0u8; len];
+
+    let w_f = width as f32;
+    let h_f = height as f32;
+    let base_dim = width.min(height) as f32;
+
+    fn denorm(value: f32, max: f32) -> f32 {
+        let max_coord = (max - 1.0).max(1.0);
+        if value <= 1.5 {
+            (value * max_coord).clamp(0.0, max_coord)
+        } else {
+            value
+        }
+    }
+
+    fn denorm_len(value: f32, base_dim: f32) -> f32 {
+        if value <= 1.5 {
+            (value * base_dim).max(0.0)
+        } else {
+            value
+        }
+    }
+
+    let start_x = denorm(params.start_x, w_f);
+    let start_y = denorm(params.start_y, h_f);
+    let end_x = denorm(params.end_x, w_f);
+    let end_y = denorm(params.end_y, h_f);
+    let range = denorm_len(params.range, base_dim).max(0.01);
+
+    let line_vec_x = end_x - start_x;
+    let line_vec_y = end_y - start_y;
+    let len_sq = line_vec_x * line_vec_x + line_vec_y * line_vec_y;
+    if len_sq < 0.01 {
+        return mask;
+    }
+    let inv_len = 1.0 / len_sq.sqrt();
+    let perp_vec_x = -line_vec_y * inv_len;
+    let perp_vec_y = line_vec_x * inv_len;
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel_vec_x = x as f32 - start_x;
+            let pixel_vec_y = y as f32 - start_y;
+            let dist_perp = pixel_vec_x * perp_vec_x + pixel_vec_y * perp_vec_y;
+            let t = dist_perp / range;
+            let intensity = (0.5 - t * 0.5).clamp(0.0, 1.0);
+            let idx = (y * width + x) as usize;
+            mask[idx] = (intensity * 255.0).round() as u8;
+        }
+    }
+
+    mask
+}
+
+fn generate_mask_bitmap(sub_masks: &[SubMaskPayload], width: u32, height: u32) -> Vec<u8> {
+    let mut mask = generate_brush_mask(sub_masks, width, height);
+    for sub_mask in sub_masks.iter().filter(|s| s.visible) {
+        let sub_bitmap = match sub_mask.mask_type.as_str() {
+            "radial" => Some(generate_radial_mask(&sub_mask.parameters, width, height)),
+            "linear" => Some(generate_linear_mask(&sub_mask.parameters, width, height)),
+            _ => None,
+        };
+        if let Some(bitmap) = sub_bitmap {
+            apply_submask_bitmap(&mut mask, &bitmap, sub_mask.mode);
+        }
+    }
+    mask
+}
+
 fn get_luma(color: [f32; 3]) -> f32 {
     color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722
 }
@@ -670,6 +1216,90 @@ fn rgb_to_hue(color: [f32; 3]) -> f32 {
     };
     
     if hue < 0.0 { hue + 360.0 } else { hue }
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+
+    let (rp, gp, bp) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+
+    [rp + m, gp + m, bp + m]
+}
+
+fn apply_color_grading(
+    color: [f32; 3],
+    shadows: ColorGradeSettings,
+    midtones: ColorGradeSettings,
+    highlights: ColorGradeSettings,
+    blending: f32,
+    balance: f32,
+) -> [f32; 3] {
+    let luma = get_luma([color[0].max(0.0), color[1].max(0.0), color[2].max(0.0)]);
+    let base_shadow_crossover = 0.1;
+    let base_highlight_crossover = 0.5;
+    let balance_range = 0.5;
+    let shadow_crossover = base_shadow_crossover + (-balance).max(0.0) * balance_range;
+    let highlight_crossover = base_highlight_crossover - balance.max(0.0) * balance_range;
+    let feather = 0.2 * blending;
+    let final_shadow_crossover = shadow_crossover.min(highlight_crossover - 0.01);
+    let shadow_mask =
+        1.0 - smoothstep(final_shadow_crossover - feather, final_shadow_crossover + feather, luma);
+    let highlight_mask = smoothstep(highlight_crossover - feather, highlight_crossover + feather, luma);
+    let midtone_mask = (1.0 - shadow_mask - highlight_mask).max(0.0);
+
+    let mut graded_color = color;
+    let shadow_sat_strength = 0.3;
+    let shadow_lum_strength = 0.5;
+    let midtone_sat_strength = 0.6;
+    let midtone_lum_strength = 0.8;
+    let highlight_sat_strength = 0.8;
+    let highlight_lum_strength = 1.0;
+
+    if shadows.saturation > 0.001 {
+        let tint_rgb = hsv_to_rgb(shadows.hue, 1.0, 1.0);
+        graded_color[0] += (tint_rgb[0] - 0.5) * shadows.saturation * shadow_mask * shadow_sat_strength;
+        graded_color[1] += (tint_rgb[1] - 0.5) * shadows.saturation * shadow_mask * shadow_sat_strength;
+        graded_color[2] += (tint_rgb[2] - 0.5) * shadows.saturation * shadow_mask * shadow_sat_strength;
+    }
+    graded_color[0] += shadows.luminance * shadow_mask * shadow_lum_strength;
+    graded_color[1] += shadows.luminance * shadow_mask * shadow_lum_strength;
+    graded_color[2] += shadows.luminance * shadow_mask * shadow_lum_strength;
+
+    if midtones.saturation > 0.001 {
+        let tint_rgb = hsv_to_rgb(midtones.hue, 1.0, 1.0);
+        graded_color[0] += (tint_rgb[0] - 0.5) * midtones.saturation * midtone_mask * midtone_sat_strength;
+        graded_color[1] += (tint_rgb[1] - 0.5) * midtones.saturation * midtone_mask * midtone_sat_strength;
+        graded_color[2] += (tint_rgb[2] - 0.5) * midtones.saturation * midtone_mask * midtone_sat_strength;
+    }
+    graded_color[0] += midtones.luminance * midtone_mask * midtone_lum_strength;
+    graded_color[1] += midtones.luminance * midtone_mask * midtone_lum_strength;
+    graded_color[2] += midtones.luminance * midtone_mask * midtone_lum_strength;
+
+    if highlights.saturation > 0.001 {
+        let tint_rgb = hsv_to_rgb(highlights.hue, 1.0, 1.0);
+        graded_color[0] += (tint_rgb[0] - 0.5) * highlights.saturation * highlight_mask * highlight_sat_strength;
+        graded_color[1] += (tint_rgb[1] - 0.5) * highlights.saturation * highlight_mask * highlight_sat_strength;
+        graded_color[2] += (tint_rgb[2] - 0.5) * highlights.saturation * highlight_mask * highlight_sat_strength;
+    }
+    graded_color[0] += highlights.luminance * highlight_mask * highlight_lum_strength;
+    graded_color[1] += highlights.luminance * highlight_mask * highlight_lum_strength;
+    graded_color[2] += highlights.luminance * highlight_mask * highlight_lum_strength;
+
+    graded_color
 }
 
 fn apply_filmic_brightness(colors: [f32; 3], brightness_adj: f32) -> [f32; 3] {
@@ -859,7 +1489,17 @@ fn apply_color_adjustments(mut colors: [f32; 3], settings: &AdjustmentValues) ->
     
     // Highlights
     colors = apply_highlights_adjustment(colors, settings.highlights);
-    
+
+    // RapidRAW-like color grading wheels (shadows/midtones/highlights)
+    colors = apply_color_grading(
+        colors,
+        settings.color_grading.shadows,
+        settings.color_grading.midtones,
+        settings.color_grading.highlights,
+        settings.color_grading.blending,
+        settings.color_grading.balance,
+    );
+
     let luma = get_luma(colors);
     
     // Saturation adjustment - RapidRAW: mix(vec3(luma), processed, 1.0 + sat)
@@ -1037,6 +1677,8 @@ fn render_linear_with_payload(
 ) -> Result<Vec<u8>> {
     let adjustment_values = payload.to_values().normalized(&ADJUSTMENT_SCALES);
     let use_basic_tone_mapper = matches!(adjustment_values.tone_mapper, ToneMapper::Basic);
+    let global_curves = CurvesRuntime::from_payload(&payload.curves);
+    let curves_are_active = !global_curves.is_default() || mask_runtimes.iter().any(|m| m.curves_are_active);
 
     let width = linear_buffer.width();
     let height = linear_buffer.height();
@@ -1080,9 +1722,45 @@ fn render_linear_with_payload(
             ];
         }
 
-        out[0] = clamp_to_u8(linear_to_srgb(composite[0]) * 255.0);
-        out[1] = clamp_to_u8(linear_to_srgb(composite[1]) * 255.0);
-        out[2] = clamp_to_u8(linear_to_srgb(composite[2]) * 255.0);
+        let mut srgb = [
+            linear_to_srgb(composite[0]),
+            linear_to_srgb(composite[1]),
+            linear_to_srgb(composite[2]),
+        ];
+
+        if curves_are_active {
+            srgb = global_curves.apply_all(srgb);
+
+            for mask in mask_runtimes {
+                if !mask.curves_are_active {
+                    continue;
+                }
+
+                let mut selection = if let Some(bitmap) = &mask.bitmap {
+                    bitmap.get(idx).copied().unwrap_or(0) as f32 / 255.0
+                } else {
+                    1.0
+                };
+                if mask.invert {
+                    selection = 1.0 - selection;
+                }
+                let influence = (selection * mask.opacity_factor).clamp(0.0, 1.0);
+                if influence <= 0.001 {
+                    continue;
+                }
+
+                let mask_curved = mask.curves.apply_all(srgb);
+                srgb = [
+                    srgb[0] + (mask_curved[0] - srgb[0]) * influence,
+                    srgb[1] + (mask_curved[1] - srgb[1]) * influence,
+                    srgb[2] + (mask_curved[2] - srgb[2]) * influence,
+                ];
+            }
+        }
+
+        out[0] = clamp_to_u8(srgb[0] * 255.0);
+        out[1] = clamp_to_u8(srgb[1] * 255.0);
+        out[2] = clamp_to_u8(srgb[2] * 255.0);
     }
 
     let mut encoded = Vec::new();
@@ -1146,8 +1824,44 @@ struct MasksCache {
     runtimes: Vec<MaskRuntime>,
 }
 
+fn extract_metadata_json(raw_bytes: &[u8]) -> Result<String> {
+    let source = RawSource::new_from_slice(raw_bytes);
+    let decoder = rawler::get_decoder(&source).context("No decoder for RAW")?;
+    let metadata = decoder
+        .raw_metadata(&source, &RawDecodeParams::default())
+        .context("Failed to read RAW metadata")?;
+
+    let exif = &metadata.exif;
+    let iso = exif
+        .iso_speed
+        .map(|v| v.to_string())
+        .or_else(|| exif.iso_speed_ratings.map(|v| v.to_string()))
+        .unwrap_or_default();
+
+    let lens = metadata
+        .lens
+        .as_ref()
+        .map(|l| l.lens_name.clone())
+        .or_else(|| exif.lens_model.clone())
+        .unwrap_or_default();
+
+    let payload = json!({
+        "make": metadata.make,
+        "model": metadata.model,
+        "lens": lens,
+        "iso": iso,
+        "exposureTime": exif.exposure_time.map(|v| v.to_string()).unwrap_or_default(),
+        "fNumber": exif.fnumber.map(|v| v.to_string()).unwrap_or_default(),
+        "focalLength": exif.focal_length.map(|v| v.to_string()).unwrap_or_default(),
+        "dateTimeOriginal": exif.date_time_original.clone().or(exif.create_date.clone()).unwrap_or_default(),
+    });
+
+    Ok(payload.to_string())
+}
+
 struct Session {
     raw_bytes: Vec<u8>,
+    metadata_json: String,
 
     super_low: Option<Arc<LinearImage>>,
     low: Option<Arc<LinearImage>>,
@@ -1160,8 +1874,10 @@ struct Session {
 
 impl Session {
     fn new(raw_bytes: Vec<u8>) -> Self {
+        let metadata_json = extract_metadata_json(&raw_bytes).unwrap_or_else(|_| "{}".to_string());
         Self {
             raw_bytes,
+            metadata_json,
             super_low: None,
             low: None,
             preview: None,
@@ -1308,6 +2024,27 @@ pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_releaseSes
     }
     if let Ok(mut map) = sessions().lock() {
         map.remove(&(handle as u64));
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_getMetadataJsonFromSession(
+    env: JNIEnv,
+    _: JClass,
+    handle: jlong,
+) -> jstring {
+    ensure_logger();
+    let session = match get_session(handle) {
+        Some(s) => s,
+        None => return ptr::null_mut(),
+    };
+    let session = match session.lock() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+    match env.new_string(session.metadata_json.as_str()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => ptr::null_mut(),
     }
 }
 

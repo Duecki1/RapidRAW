@@ -35,7 +35,8 @@ class ProjectStorage(private val context: Context) {
         val id: String,
         val fileName: String,
         val createdAt: Long,
-        val modifiedAt: Long
+        val modifiedAt: Long,
+        val rating: Int = 0
     )
     
     data class ProjectData(
@@ -155,6 +156,16 @@ class ProjectStorage(private val context: Context) {
         val index = projects.indexOfFirst { it.id == projectId }
         if (index >= 0) {
             projects[index] = projects[index].copy(modifiedAt = System.currentTimeMillis())
+            saveProjectIndex(projects)
+        }
+    }
+
+    fun setRating(projectId: String, rating: Int) {
+        val clamped = rating.coerceIn(0, 5)
+        val projects = getAllProjects().toMutableList()
+        val index = projects.indexOfFirst { it.id == projectId }
+        if (index >= 0) {
+            projects[index] = projects[index].copy(rating = clamped, modifiedAt = System.currentTimeMillis())
             saveProjectIndex(projects)
         }
     }

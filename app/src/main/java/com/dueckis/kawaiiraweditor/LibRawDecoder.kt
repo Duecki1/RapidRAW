@@ -13,6 +13,8 @@ object LibRawDecoder {
     external fun lowdecodeFromSession(handle: Long, adjustmentsJson: String): ByteArray?
     external fun decodeFullResFromSession(handle: Long, adjustmentsJson: String): ByteArray?
 
+    external fun getMetadataJsonFromSession(handle: Long): String?
+
     external fun decode(rawData: ByteArray, adjustmentsJson: String): ByteArray?
     external fun lowlowdecode(rawData: ByteArray, adjustmentsJson: String): ByteArray?
     external fun lowdecode(rawData: ByteArray, adjustmentsJson: String): ByteArray?

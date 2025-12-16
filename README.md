@@ -7,3 +7,5 @@ This is a fork of RapidRaw.
 https://github.com/CyberTimon/RapidRAW
 
 This mobile port is just a Draft/Test.
+
+License: AGPL-3.0 (see `LICENSE`).
