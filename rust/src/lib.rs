@@ -4,9 +4,15 @@
 mod raw_processing;
 
 use anyhow::{Context, Result};
-use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, ImageBuffer, Rgba};
+use image::{
+    codecs::jpeg::JpegEncoder,
+    imageops::FilterType,
+    ExtendedColorType,
+    ImageBuffer,
+    Rgba,
+};
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::jbyteArray;
+use jni::sys::{jbyteArray, jlong};
 use jni::JNIEnv;
 use log::error;
 #[cfg(target_os = "android")]
@@ -15,9 +21,11 @@ use raw_processing::develop_raw_image;
 use serde::Deserialize;
 use serde_json::from_str;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::ops::AddAssign;
 use std::ptr;
-use std::sync::Once;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 #[derive(Clone, Copy, Default)]
 struct AdjustmentValues {
@@ -991,19 +999,20 @@ fn apply_default_raw_processing(colors: [f32; 3], use_basic_tone_mapper: bool) -
     ]
 }
 
-fn render_raw(
+type LinearImage = ImageBuffer<Rgba<f32>, Vec<f32>>;
+
+fn develop_preview_linear(
     raw_bytes: &[u8],
-    adjustments_json: Option<&str>,
     fast_demosaic: bool,
     max_width: Option<u32>,
     max_height: Option<u32>,
-) -> Result<Vec<u8>> {
-    let highlight_compression = 2.5;  // RapidRAW default
-    let dynamic_image = develop_raw_image(raw_bytes, fast_demosaic, highlight_compression)
+) -> Result<LinearImage> {
+    let highlight_compression = 2.5; // RapidRAW default
+    let mut dynamic_image = develop_raw_image(raw_bytes, fast_demosaic, highlight_compression)
         .context("Failed to decode RAW image")?;
+
     // If a maximum size was requested, downscale BEFORE the per-pixel adjustments
     // to avoid performing expensive color math at full sensor resolution.
-    let mut dynamic_image = dynamic_image;
     if let (Some(max_w), Some(max_h)) = (max_width, max_height) {
         if dynamic_image.width() > max_w || dynamic_image.height() > max_h {
             // Fit within the requested box while preserving aspect ratio.
@@ -1017,32 +1026,39 @@ fn render_raw(
         }
     }
 
-    let payload = parse_adjustments_payload(adjustments_json);
-    let adjustment_values = payload.to_values().normalized(&ADJUSTMENT_SCALES);
+    Ok(dynamic_image.to_rgba32f())
+}
 
+fn render_linear_with_payload(
+    linear_buffer: &LinearImage,
+    payload: &AdjustmentsPayload,
+    mask_runtimes: &[MaskRuntime],
+    fast_demosaic: bool,
+) -> Result<Vec<u8>> {
+    let adjustment_values = payload.to_values().normalized(&ADJUSTMENT_SCALES);
     let use_basic_tone_mapper = matches!(adjustment_values.tone_mapper, ToneMapper::Basic);
 
-    let linear_buffer = dynamic_image.to_rgba32f();
     let width = linear_buffer.width();
     let height = linear_buffer.height();
 
-    let mask_runtimes = parse_masks(payload.masks, width, height);
+    let linear = linear_buffer.as_raw();
+    debug_assert_eq!(linear.len(), (width as usize) * (height as usize) * 4);
 
-    let result_buffer: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_fn(width, height, |x, y| {
-        let pixel = linear_buffer.get_pixel(x, y);
-        
+    let mut rgb = vec![0u8; (width as usize) * (height as usize) * 3];
+
+    for (idx, out) in rgb.chunks_exact_mut(3).enumerate() {
+        let base = idx * 4;
+
         // Start with linear RAW pixel data
-        let mut colors = [pixel[0], pixel[1], pixel[2]];
-        
+        let mut colors = [linear[base], linear[base + 1], linear[base + 2]];
+
         // Apply default RAW processing (brightness + contrast boost for Basic tone mapper)
         colors = apply_default_raw_processing(colors, use_basic_tone_mapper);
-        
-        let idx = (y * width + x) as usize;
 
         // RapidRAW-like mask compositing: apply globals once, then for each mask
         // mix toward a separately-adjusted result by mask influence.
         let mut composite = apply_color_adjustments(colors, &adjustment_values);
-        for mask in &mask_runtimes {
+        for mask in mask_runtimes {
             let mut selection = if let Some(bitmap) = &mask.bitmap {
                 bitmap.get(idx).copied().unwrap_or(0) as f32 / 255.0
             } else {
@@ -1064,29 +1080,31 @@ fn render_raw(
             ];
         }
 
-        let adjusted = composite;
-        Rgba([
-            clamp_to_u8(linear_to_srgb(adjusted[0]) * 255.0),
-            clamp_to_u8(linear_to_srgb(adjusted[1]) * 255.0),
-            clamp_to_u8(linear_to_srgb(adjusted[2]) * 255.0),
-            255,
-        ])
-    });
-
-    let mut final_image = DynamicImage::ImageRgba8(result_buffer);
-    // We already downscaled earlier for previews; apply final resize only if caller still requested
-    // a different size than what we've already produced.
-    if let (Some(max_w), Some(max_h)) = (max_width, max_height) {
-        if final_image.width() > max_w || final_image.height() > max_h {
-            final_image = final_image.resize(max_w, max_h, FilterType::Lanczos3);
-        }
+        out[0] = clamp_to_u8(linear_to_srgb(composite[0]) * 255.0);
+        out[1] = clamp_to_u8(linear_to_srgb(composite[1]) * 255.0);
+        out[2] = clamp_to_u8(linear_to_srgb(composite[2]) * 255.0);
     }
 
     let mut encoded = Vec::new();
     let quality = if fast_demosaic { 88 } else { 96 };
     let mut encoder = JpegEncoder::new_with_quality(&mut encoded, quality);
-    encoder.encode_image(&final_image)?;
+    encoder.encode(&rgb, width, height, ExtendedColorType::Rgb8)?;
     Ok(encoded)
+}
+
+fn render_raw(
+    raw_bytes: &[u8],
+    adjustments_json: Option<&str>,
+    fast_demosaic: bool,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+) -> Result<Vec<u8>> {
+    let linear_buffer = develop_preview_linear(raw_bytes, fast_demosaic, max_width, max_height)?;
+    let payload = parse_adjustments_payload(adjustments_json);
+    let width = linear_buffer.width();
+    let height = linear_buffer.height();
+    let mask_runtimes = parse_masks(payload.masks.clone(), width, height);
+    render_linear_with_payload(&linear_buffer, &payload, &mask_runtimes, fast_demosaic)
 }
 
 static LOGGER_INIT: Once = Once::new();
@@ -1102,6 +1120,120 @@ fn ensure_logger() {
             );
         }
     });
+}
+
+#[derive(Clone, Copy)]
+enum PreviewKind {
+    SuperLow,
+    Low,
+    Preview,
+}
+
+impl PreviewKind {
+    fn max_dims(self) -> (u32, u32) {
+        match self {
+            PreviewKind::SuperLow => (64, 64),
+            PreviewKind::Low => (256, 256),
+            PreviewKind::Preview => (1280, 720),
+        }
+    }
+}
+
+struct MasksCache {
+    masks: Vec<Value>,
+    width: u32,
+    height: u32,
+    runtimes: Vec<MaskRuntime>,
+}
+
+struct Session {
+    raw_bytes: Vec<u8>,
+
+    super_low: Option<Arc<LinearImage>>,
+    low: Option<Arc<LinearImage>>,
+    preview: Option<Arc<LinearImage>>,
+
+    masks_super_low: Option<MasksCache>,
+    masks_low: Option<MasksCache>,
+    masks_preview: Option<MasksCache>,
+}
+
+impl Session {
+    fn new(raw_bytes: Vec<u8>) -> Self {
+        Self {
+            raw_bytes,
+            super_low: None,
+            low: None,
+            preview: None,
+            masks_super_low: None,
+            masks_low: None,
+            masks_preview: None,
+        }
+    }
+
+    fn linear_for(&mut self, kind: PreviewKind) -> Result<Arc<LinearImage>> {
+        let slot = match kind {
+            PreviewKind::SuperLow => &mut self.super_low,
+            PreviewKind::Low => &mut self.low,
+            PreviewKind::Preview => &mut self.preview,
+        };
+        if let Some(img) = slot.as_ref() {
+            return Ok(Arc::clone(img));
+        }
+
+        let (max_w, max_h) = kind.max_dims();
+        let linear = develop_preview_linear(&self.raw_bytes, true, Some(max_w), Some(max_h))?;
+        let shared = Arc::new(linear);
+        *slot = Some(Arc::clone(&shared));
+        Ok(shared)
+    }
+
+    fn masks_for<'a>(
+        &'a mut self,
+        kind: PreviewKind,
+        masks: &[Value],
+        width: u32,
+        height: u32,
+    ) -> &'a [MaskRuntime] {
+        let slot = match kind {
+            PreviewKind::SuperLow => &mut self.masks_super_low,
+            PreviewKind::Low => &mut self.masks_low,
+            PreviewKind::Preview => &mut self.masks_preview,
+        };
+
+        let cache_hit = slot.as_ref().is_some_and(|cache| {
+            cache.width == width && cache.height == height && cache.masks == masks
+        });
+        if cache_hit {
+            return &slot.as_ref().expect("cache_hit implies Some").runtimes;
+        }
+
+        let runtimes = parse_masks(masks.to_vec(), width, height);
+        *slot = Some(MasksCache {
+            masks: masks.to_vec(),
+            width,
+            height,
+            runtimes,
+        });
+        &slot.as_ref().expect("cache just set").runtimes
+    }
+}
+
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<Session>>>>> = OnceLock::new();
+
+fn sessions() -> &'static Mutex<HashMap<u64, Arc<Mutex<Session>>>> {
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_session(handle: jlong) -> Option<Arc<Mutex<Session>>> {
+    if handle <= 0 {
+        return None;
+    }
+    sessions()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&(handle as u64)).cloned())
 }
 
 fn convert_raw_array(env: &JNIEnv, raw_array: JByteArray) -> Option<Vec<u8>> {
@@ -1137,6 +1269,148 @@ fn read_adjustments_json(env: &mut JNIEnv, adjustments: JString) -> Option<Strin
         Err(err) => {
             error!("Failed to read adjustments JSON: {}", err);
             None
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_createSession(
+    env: JNIEnv,
+    _: JClass,
+    raw_data: JByteArray,
+) -> jlong {
+    ensure_logger();
+    let bytes = match convert_raw_array(&env, raw_data) {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let session = Arc::new(Mutex::new(Session::new(bytes)));
+    if let Ok(mut map) = sessions().lock() {
+        map.insert(id, session);
+    } else {
+        error!("Failed to lock session registry");
+        return 0;
+    }
+
+    id as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_releaseSession(
+    _env: JNIEnv,
+    _: JClass,
+    handle: jlong,
+) {
+    if handle <= 0 {
+        return;
+    }
+    if let Ok(mut map) = sessions().lock() {
+        map.remove(&(handle as u64));
+    }
+}
+
+fn render_from_session(
+    handle: jlong,
+    adjustments_json: Option<&str>,
+    kind: PreviewKind,
+) -> Result<Vec<u8>> {
+    let session = get_session(handle).context("Invalid session handle")?;
+    let mut session = session.lock().map_err(|_| anyhow::anyhow!("Session lock poisoned"))?;
+
+    let linear = session.linear_for(kind)?;
+    let payload = parse_adjustments_payload(adjustments_json);
+    let width = linear.width();
+    let height = linear.height();
+    let masks = session.masks_for(kind, &payload.masks, width, height);
+
+    render_linear_with_payload(linear.as_ref(), &payload, masks, true)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_lowlowdecodeFromSession(
+    mut env: JNIEnv,
+    _: JClass,
+    handle: jlong,
+    adjustments_json: JString,
+) -> jbyteArray {
+    ensure_logger();
+    let adjustments = read_adjustments_json(&mut env, adjustments_json);
+    match render_from_session(handle, adjustments.as_deref(), PreviewKind::SuperLow) {
+        Ok(payload) => make_byte_array(&env, &payload),
+        Err(err) => {
+            error!("Failed to render session preview: {}", err);
+            ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_lowdecodeFromSession(
+    mut env: JNIEnv,
+    _: JClass,
+    handle: jlong,
+    adjustments_json: JString,
+) -> jbyteArray {
+    ensure_logger();
+    let adjustments = read_adjustments_json(&mut env, adjustments_json);
+    match render_from_session(handle, adjustments.as_deref(), PreviewKind::Low) {
+        Ok(payload) => make_byte_array(&env, &payload),
+        Err(err) => {
+            error!("Failed to render session preview: {}", err);
+            ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_decodeFromSession(
+    mut env: JNIEnv,
+    _: JClass,
+    handle: jlong,
+    adjustments_json: JString,
+) -> jbyteArray {
+    ensure_logger();
+    let adjustments = read_adjustments_json(&mut env, adjustments_json);
+    match render_from_session(handle, adjustments.as_deref(), PreviewKind::Preview) {
+        Ok(payload) => make_byte_array(&env, &payload),
+        Err(err) => {
+            error!("Failed to render session preview: {}", err);
+            ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dueckis_kawaiiraweditor_LibRawDecoder_decodeFullResFromSession(
+    mut env: JNIEnv,
+    _: JClass,
+    handle: jlong,
+    adjustments_json: JString,
+) -> jbyteArray {
+    ensure_logger();
+    let adjustments = read_adjustments_json(&mut env, adjustments_json);
+    let session = match get_session(handle) {
+        Some(s) => s,
+        None => {
+            error!("Invalid session handle: {}", handle);
+            return ptr::null_mut();
+        }
+    };
+    let session = match session.lock() {
+        Ok(s) => s,
+        Err(_) => {
+            error!("Session lock poisoned");
+            return ptr::null_mut();
+        }
+    };
+
+    match render_raw(&session.raw_bytes, adjustments.as_deref(), false, None, None) {
+        Ok(payload) => make_byte_array(&env, &payload),
+        Err(err) => {
+            error!("Failed to render full-resolution image: {}", err);
+            ptr::null_mut()
         }
     }
 }

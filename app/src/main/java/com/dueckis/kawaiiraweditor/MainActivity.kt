@@ -764,7 +764,7 @@ private fun EditorScreen(
     val configuration = LocalConfiguration.current
     val isTablet = configuration.screenWidthDp >= 600
 
-    var rawBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var sessionHandle by remember { mutableStateOf(0L) }
     var adjustments by remember { mutableStateOf(AdjustmentState()) }
     var masks by remember { mutableStateOf<List<MaskState>>(emptyList()) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -789,10 +789,31 @@ private fun EditorScreen(
         onDispose { renderDispatcher.close() }
     }
 
+    DisposableEffect(sessionHandle) {
+        val handleToRelease = sessionHandle
+        onDispose {
+            if (handleToRelease != 0L) {
+                LibRawDecoder.releaseSession(handleToRelease)
+            }
+        }
+    }
+
     // Load RAW file and adjustments from storage
     LaunchedEffect(galleryItem.projectId) {
-        rawBytes = withContext(Dispatchers.IO) {
+        val raw = withContext(Dispatchers.IO) {
             storage.loadRawBytes(galleryItem.projectId)
+        }
+        if (raw == null) {
+            sessionHandle = 0L
+            errorMessage = "Failed to load RAW file."
+            return@LaunchedEffect
+        }
+        sessionHandle = withContext(renderDispatcher) {
+            runCatching { LibRawDecoder.createSession(raw) }.getOrDefault(0L)
+        }
+        if (sessionHandle == 0L) {
+            errorMessage = "Failed to initialize native decoder."
+            return@LaunchedEffect
         }
         val savedAdjustmentsJson = withContext(Dispatchers.IO) {
             storage.loadAdjustments(galleryItem.projectId)
@@ -926,8 +947,9 @@ private fun EditorScreen(
         }
     }
 
-    LaunchedEffect(rawBytes) {
-        val raw = rawBytes ?: return@LaunchedEffect
+    LaunchedEffect(sessionHandle) {
+        val handle = sessionHandle
+        if (handle == 0L) return@LaunchedEffect
 
         // Ensure we always start with a render request for the current state.
         renderRequests.trySend(
@@ -949,7 +971,7 @@ private fun EditorScreen(
 
             // Stage 1: super-low quality (fast feedback while dragging).
             val superLowBitmap = withContext(renderDispatcher) {
-                val bytes = runCatching { LibRawDecoder.lowlowdecode(raw, requestJson) }.getOrNull()
+                val bytes = runCatching { LibRawDecoder.lowlowdecodeFromSession(handle, requestJson) }.getOrNull()
                 bytes?.decodeToBitmap()
             }
             if (superLowBitmap != null && requestVersion > lastPreviewVersion.get()) {
@@ -966,7 +988,7 @@ private fun EditorScreen(
 
             // Stage 2: low quality (still fast, but clearer).
             val lowBitmap = withContext(renderDispatcher) {
-                val bytes = runCatching { LibRawDecoder.lowdecode(raw, requestJson) }.getOrNull()
+                val bytes = runCatching { LibRawDecoder.lowdecodeFromSession(handle, requestJson) }.getOrNull()
                 bytes?.decodeToBitmap()
             }
             if (lowBitmap != null && requestVersion > lastPreviewVersion.get()) {
@@ -983,7 +1005,7 @@ private fun EditorScreen(
 
             isLoading = true
             val fullBitmap = withContext(renderDispatcher) {
-                val bytes = runCatching { LibRawDecoder.decode(raw, requestJson) }.getOrNull()
+                val bytes = runCatching { LibRawDecoder.decodeFromSession(handle, requestJson) }.getOrNull()
                 bytes?.decodeToBitmap()
             }
             isLoading = false
@@ -1113,7 +1135,7 @@ private fun EditorScreen(
                             
                             // Export button at bottom
                             ExportButton(
-                                rawBytes = rawBytes,
+                                sessionHandle = sessionHandle,
                                 adjustments = adjustments,
                                 masks = masks,
                                 isExporting = isExporting,
@@ -1269,7 +1291,7 @@ private fun EditorScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                     ExportButton(
-                                        rawBytes = rawBytes,
+                                        sessionHandle = sessionHandle,
                                         adjustments = adjustments,
                                         masks = masks,
                                         isExporting = isExporting,
@@ -1343,7 +1365,7 @@ private fun EditorScreen(
 
 @Composable
 private fun ExportButton(
-    rawBytes: ByteArray?,
+    sessionHandle: Long,
     adjustments: AdjustmentState,
     masks: List<MaskState>,
     isExporting: Boolean,
@@ -1356,15 +1378,14 @@ private fun ExportButton(
     
     Button(
         onClick = {
-            val raw = rawBytes
-            if (isExporting || raw == null) return@Button
+            if (isExporting || sessionHandle == 0L) return@Button
             val currentAdjustments = adjustments
             val currentMasks = masks
             onExportStart()
             coroutineScope.launch {
                 val currentJson = withContext(Dispatchers.Default) { currentAdjustments.toJson(currentMasks) }
                 val fullBytes = withContext(nativeDispatcher) {
-                    runCatching { LibRawDecoder.decodeFullRes(raw, currentJson) }.getOrNull()
+                    runCatching { LibRawDecoder.decodeFullResFromSession(sessionHandle, currentJson) }.getOrNull()
                 }
                 if (fullBytes == null) {
                     onExportComplete(false, "Export failed.")
@@ -1380,7 +1401,7 @@ private fun ExportButton(
                 }
             }
         },
-        enabled = rawBytes != null && !isExporting
+        enabled = sessionHandle != 0L && !isExporting
     ) {
         if (isExporting) {
             CircularProgressIndicator(
