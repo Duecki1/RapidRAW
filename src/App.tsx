@@ -2284,6 +2284,14 @@ function App() {
   useEffect(() => {
     let isEffectActive = true;
     const listeners = [
+      listen('preview-update-fast', (event: any) => {
+        if (isEffectActive) {
+          const imageData = new Uint8Array(event.payload);
+          const blob = new Blob([imageData], { type: 'image/jpeg' });
+          const url = URL.createObjectURL(blob);
+          setFinalPreviewUrl(url);
+        }
+      }),
       listen('preview-update-final', (event: any) => {
         if (isEffectActive) {
           const imageData = new Uint8Array(event.payload);

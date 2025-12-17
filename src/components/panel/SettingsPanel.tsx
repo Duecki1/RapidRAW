@@ -305,6 +305,7 @@ export default function SettingsPanel({
 
   const [processingSettings, setProcessingSettings] = useState({
     editorPreviewResolution: appSettings?.editorPreviewResolution || 1920,
+    progressivePreview: appSettings?.progressivePreview ?? false,
     rawHighlightCompression: appSettings?.rawHighlightCompression ?? 2.5,
     processingBackend: appSettings?.processingBackend || 'auto',
     linuxGpuOptimization: appSettings?.linuxGpuOptimization ?? false,
@@ -323,6 +324,7 @@ export default function SettingsPanel({
     setComfyConfig(appSettings?.comfyuiWorkflowConfig || DEFAULT_WORKFLOW_CONFIG);
     setProcessingSettings({
       editorPreviewResolution: appSettings?.editorPreviewResolution || 1920,
+      progressivePreview: appSettings?.progressivePreview ?? false,
       rawHighlightCompression: appSettings?.rawHighlightCompression ?? 2.5,
       processingBackend: appSettings?.processingBackend || 'auto',
       linuxGpuOptimization: appSettings?.linuxGpuOptimization ?? false,
@@ -892,6 +894,18 @@ export default function SettingsPanel({
                         onChange={(value: any) => handleProcessingSettingChange('editorPreviewResolution', value)}
                         options={resolutions}
                         value={processingSettings.editorPreviewResolution}
+                      />
+                    </SettingItem>
+
+                    <SettingItem
+                      label="Progressive Preview Rendering"
+                      description="When enabled, RapidRAW renders a lower-resolution preview while you adjust sliders and then refines the image after you stop, improving responsiveness."
+                    >
+                      <Switch
+                        checked={processingSettings.progressivePreview}
+                        id="progressive-preview-toggle"
+                        label="Enable Progressive Preview"
+                        onChange={(checked) => handleProcessingSettingChange('progressivePreview', checked)}
                       />
                     </SettingItem>
 

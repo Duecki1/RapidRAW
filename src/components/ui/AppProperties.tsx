@@ -134,6 +134,7 @@ export interface AppSettings {
   comfyuiWorkflowConfig?: ComfyUIWorkflowConfig;
   decorations?: any;
   editorPreviewResolution?: number;
+  progressivePreview?: boolean;
   enableZoomHifi?: boolean;
   enableAiTagging?: boolean;
   enableExifReading?: boolean;
