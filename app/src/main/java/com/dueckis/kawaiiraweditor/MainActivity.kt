@@ -92,6 +92,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -2296,6 +2297,7 @@ private fun TabbedEditorControls(
     onMaskTapModeChange: (MaskTapMode) -> Unit
 ) {
     val tabs = listOf(EditorPanelTab.Adjustments, EditorPanelTab.Color, EditorPanelTab.Masks)
+    val maskTabsByMaskId = remember { mutableStateMapOf<String, Int>() }
     TabRow(selectedTabIndex = tabs.indexOf(panelTab).coerceAtLeast(0)) {
         Tab(
             selected = panelTab == EditorPanelTab.Adjustments,
@@ -2996,34 +2998,81 @@ private fun TabbedEditorControls(
             }
             }
 
-            PanelSectionCard(title = "Mask Adjustments", subtitle = "Edits inside this mask") {
-                adjustmentSections.forEach { (sectionTitle, controls) ->
-                    Text(
-                        text = sectionTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        modifier = Modifier.padding(top = 8.dp),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        controls.forEach { control ->
-                            val currentValue = selectedMask.adjustments.valueFor(control.field)
-                            AdjustmentSlider(
-                                label = control.label,
-                                value = currentValue,
-                                range = control.range,
-                                step = control.step,
-                                defaultValue = control.defaultValue,
-                                formatter = control.formatter,
-                                onValueChange = { snapped ->
-                                    val updated = masks.map { m ->
-                                        if (m.id != selectedMask.id) m
-                                        else m.copy(adjustments = m.adjustments.withValue(control.field, snapped))
-                                    }
-                                    onMasksChange(updated)
-                                    val newMask = updated.firstOrNull { it.id == selectedMask.id }
-                                    onShowMaskOverlayChange(newMask?.adjustments?.isNeutralForMask() == true)
-                                }
+            val maskInnerTabs = listOf("Adjust", "Color")
+            val selectedMaskTab = maskTabsByMaskId.getOrPut(selectedMask.id) { 0 }
+            TabRow(selectedTabIndex = selectedMaskTab) {
+                Tab(
+                    selected = selectedMaskTab == 0,
+                    onClick = { maskTabsByMaskId[selectedMask.id] = 0 },
+                    text = { Text(maskInnerTabs[0]) }
+                )
+                Tab(
+                    selected = selectedMaskTab == 1,
+                    onClick = { maskTabsByMaskId[selectedMask.id] = 1 },
+                    text = { Text(maskInnerTabs[1]) }
+                )
+            }
+
+            fun updateSelectedMaskAdjustments(updatedAdjustments: AdjustmentState) {
+                val updated = masks.map { m ->
+                    if (m.id != selectedMask.id) m else m.copy(adjustments = updatedAdjustments)
+                }
+                onMasksChange(updated)
+                val newMask = updated.firstOrNull { it.id == selectedMask.id }
+                onShowMaskOverlayChange(newMask?.adjustments?.isNeutralForMask() == true)
+            }
+
+            when (selectedMaskTab) {
+                1 -> {
+                    PanelSectionCard(
+                        title = "Curves",
+                        subtitle = "Tap to add points \u0007 Drag to adjust"
+                    ) {
+                        CurvesEditor(
+                            adjustments = selectedMask.adjustments,
+                            histogramData = histogramData,
+                            onAdjustmentsChange = ::updateSelectedMaskAdjustments
+                        )
+                    }
+
+                    PanelSectionCard(
+                        title = "Color Grading",
+                        subtitle = "Shadows / Midtones / Highlights"
+                    ) {
+                        ColorGradingEditor(
+                            colorGrading = selectedMask.adjustments.colorGrading,
+                            onColorGradingChange = { updated ->
+                                updateSelectedMaskAdjustments(selectedMask.adjustments.copy(colorGrading = updated))
+                            }
+                        )
+                    }
+                }
+
+                else -> {
+                    PanelSectionCard(title = "Mask Adjustments", subtitle = "Edits inside this mask") {
+                        adjustmentSections.forEach { (sectionTitle, controls) ->
+                            Text(
+                                text = sectionTitle,
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.padding(top = 8.dp),
+                                color = MaterialTheme.colorScheme.onSurface
                             )
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                controls.forEach { control ->
+                                    val currentValue = selectedMask.adjustments.valueFor(control.field)
+                                    AdjustmentSlider(
+                                        label = control.label,
+                                        value = currentValue,
+                                        range = control.range,
+                                        step = control.step,
+                                        defaultValue = control.defaultValue,
+                                        formatter = control.formatter,
+                                        onValueChange = { snapped ->
+                                            updateSelectedMaskAdjustments(selectedMask.adjustments.withValue(control.field, snapped))
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
