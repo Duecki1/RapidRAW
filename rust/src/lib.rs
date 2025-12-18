@@ -889,8 +889,9 @@ fn apply_feathered_circle_add(target: &mut [u8], width: u32, height: u32, cx: f3
             }
 
             let idx = (y as u32 * width + x as u32) as usize;
-            let v = (intensity * 255.0).clamp(0.0, 255.0) as u8;
-            target[idx] = target[idx].max(v);
+            let current = target[idx] as f32 / 255.0;
+            let next = 1.0 - (1.0 - current) * (1.0 - intensity);
+            target[idx] = (next.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
     }
 }
@@ -1010,7 +1011,9 @@ fn generate_brush_mask(sub_masks: &[SubMaskPayload], width: u32, height: u32) ->
     events.sort_by_key(|e| e.order);
 
     for event in events {
-        let step_size = (event.radius * (1.0 - event.feather) / 2.0).max(1.0);
+        let inner = event.radius * (1.0 - event.feather);
+        let mut step_size = (inner / 3.0).max(0.75);
+        step_size = step_size.min(event.radius * 0.25).max(0.75);
 
         let apply_circle = |mask: &mut [u8], cx: f32, cy: f32| {
             if event.mode == SubMaskMode::Additive {

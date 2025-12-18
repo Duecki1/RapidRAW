@@ -106,6 +106,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Path
@@ -613,7 +614,11 @@ private fun buildMaskOverlayBitmap(mask: MaskState, targetWidth: Int, targetHeig
 
     fun applyPixel(mode: SubMaskMode, current: Int, intensity: Int): Int {
         return when (mode) {
-            SubMaskMode.Additive -> maxOf(current, intensity)
+            SubMaskMode.Additive -> {
+                val c = current / 255f
+                val i = intensity / 255f
+                ((1f - (1f - c) * (1f - i)).coerceIn(0f, 1f) * 255f).roundToInt()
+            }
             SubMaskMode.Subtractive -> {
                 val currentF = current / 255f
                 val intensityF = intensity / 255f
@@ -3899,7 +3904,53 @@ private fun ImagePreview(
     val activeSubMaskState by rememberUpdatedState(activeSubMask)
 
     BoxWithConstraints(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .let { base ->
+                if (!isMaskMode) base
+                else base.pointerInput(bitmap) {
+                    awaitEachGesture {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.isEmpty()) break
+
+                            if (pressed.any { it.type == PointerType.Stylus }) continue
+
+                            val touchCount = pressed.count { it.type == PointerType.Touch }
+                            if (touchCount < 2) continue
+
+                            val touches = pressed.filter { it.type == PointerType.Touch }
+                            val a = touches[0]
+                            val b = touches[1]
+
+                            val prevCentroid = Offset(
+                                (a.previousPosition.x + b.previousPosition.x) / 2f,
+                                (a.previousPosition.y + b.previousPosition.y) / 2f
+                            )
+                            val currCentroid = Offset(
+                                (a.position.x + b.position.x) / 2f,
+                                (a.position.y + b.position.y) / 2f
+                            )
+                            val pan = currCentroid - prevCentroid
+
+                            val prevDx = a.previousPosition.x - b.previousPosition.x
+                            val prevDy = a.previousPosition.y - b.previousPosition.y
+                            val currDx = a.position.x - b.position.x
+                            val currDy = a.position.y - b.position.y
+                            val prevDist = kotlin.math.sqrt(prevDx * prevDx + prevDy * prevDy).coerceAtLeast(0.0001f)
+                            val currDist = kotlin.math.sqrt(currDx * currDx + currDy * currDy).coerceAtLeast(0.0001f)
+                            val zoom = currDist / prevDist
+
+                            scale = (scale * zoom).coerceIn(0.5f, 5f)
+                            offsetX += pan.x
+                            offsetY += pan.y
+
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                }
+            },
         contentAlignment = Alignment.Center
     ) {
         val containerW = with(density) { maxWidth.toPx() }
@@ -3916,9 +3967,17 @@ private fun ImagePreview(
 
             val baseDim = minOf(bmpW, bmpH)
 
+            fun toContentOffset(pos: Offset): Offset {
+                val pivot = Offset(containerW / 2f, containerH / 2f)
+                val x = pivot.x + (pos.x - offsetX - pivot.x) / scale
+                val y = pivot.y + (pos.y - offsetY - pivot.y) / scale
+                return Offset(x, y)
+            }
+
             fun toImagePoint(pos: Offset): MaskPoint {
-                val nx = ((pos.x - left) / displayW).coerceIn(0f, 1f)
-                val ny = ((pos.y - top) / displayH).coerceIn(0f, 1f)
+                val contentPos = toContentOffset(pos)
+                val nx = ((contentPos.x - left) / displayW).coerceIn(0f, 1f)
+                val ny = ((contentPos.y - top) / displayH).coerceIn(0f, 1f)
                 return MaskPoint(x = nx, y = ny)
             }
 
@@ -3926,21 +3985,20 @@ private fun ImagePreview(
                 .fillMaxSize()
                 .let { base ->
                     if (isMaskMode) base
-                    else base
-                        .pointerInput(Unit) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                scale = (scale * zoom).coerceIn(0.5f, 5f)
-                                offsetX += pan.x
-                                offsetY += pan.y
-                            }
+                    else base.pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            scale = (scale * zoom).coerceIn(0.5f, 5f)
+                            offsetX += pan.x
+                            offsetY += pan.y
                         }
-                        .graphicsLayer(
-                            scaleX = scale,
-                            scaleY = scale,
-                            translationX = offsetX,
-                            translationY = offsetY
-                        )
+                    }
                 }
+                .graphicsLayer(
+                    scaleX = scale,
+                    scaleY = scale,
+                    translationX = offsetX,
+                    translationY = offsetY
+                )
 
             Image(
                 bitmap = bitmap.asImageBitmap(),
@@ -3968,12 +4026,28 @@ private fun ImagePreview(
                         bitmap = overlayBitmap.asImageBitmap(),
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = scale,
+                                scaleY = scale,
+                                translationX = offsetX,
+                                translationY = offsetY
+                            )
                     )
                 }
 
                 if (activeSubMask != null) {
-                    Canvas(modifier = Modifier.fillMaxSize()) {
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = scale,
+                                scaleY = scale,
+                                translationX = offsetX,
+                                translationY = offsetY
+                            )
+                    ) {
                         val maxX = (bmpW - 1f).coerceAtLeast(1f)
                         val maxY = (bmpH - 1f).coerceAtLeast(1f)
                         fun toDisplayOffset(p: MaskPoint): Offset {
@@ -4045,7 +4119,8 @@ private fun ImagePreview(
                                             return kotlin.math.sqrt(dx * dx + dy * dy)
                                         }
 
-                                        val handlePx = with(density) { 24.dp.toPx() }
+                                        val handlePx = with(density) { 24.dp.toPx() } / scale.coerceAtLeast(0.0001f)
+                                        val startPos = toContentOffset(start)
 
                                         dragging = when (sub.type) {
                                             SubMaskType.Radial.id -> {
@@ -4058,7 +4133,7 @@ private fun ImagePreview(
                                                     val py = if (cy <= 1.5f) cy.coerceIn(0f, 1f) * maxY else cy.coerceIn(0f, maxY)
                                                     Offset(left + px * baseScale, top + py * baseScale)
                                                 }
-                                                if (dist(start, centerPx) <= handlePx) MaskHandle.RadialCenter else null
+                                                if (dist(startPos, centerPx) <= handlePx) MaskHandle.RadialCenter else null
                                             }
 
                                             SubMaskType.Linear.id -> {
@@ -4081,8 +4156,8 @@ private fun ImagePreview(
                                                     Offset(left + px * baseScale, top + py * baseScale)
                                                 }
                                                 when {
-                                                    dist(start, startPx) <= handlePx -> MaskHandle.LinearStart
-                                                    dist(start, endPx) <= handlePx -> MaskHandle.LinearEnd
+                                                    dist(startPos, startPx) <= handlePx -> MaskHandle.LinearStart
+                                                    dist(startPos, endPx) <= handlePx -> MaskHandle.LinearEnd
                                                     else -> null
                                                 }
                                             }
@@ -4125,7 +4200,16 @@ private fun ImagePreview(
                 }
 
                 if (currentStroke.isNotEmpty()) {
-                    Canvas(modifier = Modifier.fillMaxSize()) {
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = scale,
+                                scaleY = scale,
+                                translationX = offsetX,
+                                translationY = offsetY
+                            )
+                    ) {
                         val strokeWidth = when (activeSubMask?.type) {
                             SubMaskType.AiSubject.id -> 2.dp.toPx()
                             else -> (brushSize * baseScale).coerceAtLeast(1f)
@@ -4162,36 +4246,50 @@ private fun ImagePreview(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .pointerInput(isPainting, brushSize, bitmap) {
-                                    detectDragGestures(
-                                        onDragStart = { start ->
-                                            currentStroke.clear()
-                                            currentStroke.add(toImagePoint(start))
-                                        },
-                                        onDrag = { change, _ ->
-                                            change.consume()
-                                            val newPoint = toImagePoint(change.position)
-                                            val last = currentStroke.lastOrNull()
-                                            val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
-                                            val minStep = (brushSizeNorm / 6f).coerceAtLeast(0.003f)
-                                            if (last == null) {
-                                                currentStroke.add(newPoint)
-                                            } else {
-                                                val dx = newPoint.x - last.x
-                                                val dy = newPoint.y - last.y
-                                                if (dx * dx + dy * dy >= minStep * minStep) {
-                                                    currentStroke.add(newPoint)
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        if (down.type != PointerType.Touch && down.type != PointerType.Stylus) return@awaitEachGesture
+
+                                        val cancelOnMultiTouch = down.type == PointerType.Touch
+                                        val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
+                                        val minStep = (brushSizeNorm / 6f).coerceAtLeast(0.003f)
+
+                                        currentStroke.clear()
+                                        currentStroke.add(toImagePoint(down.position))
+                                        var last = currentStroke.lastOrNull() ?: return@awaitEachGesture
+                                        var canceled = false
+
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val pressed = event.changes.filter { it.pressed }
+                                            if (pressed.none { it.id == down.id }) break
+
+                                            if (cancelOnMultiTouch) {
+                                                val touchCount = pressed.count { it.type == PointerType.Touch }
+                                                if (touchCount >= 2) {
+                                                    canceled = true
+                                                    break
                                                 }
                                             }
-                                        },
-                                        onDragEnd = {
-                                            if (currentStroke.isNotEmpty()) {
-                                                val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
-                                                callback(currentStroke.toList(), brushSizeNorm)
+
+                                            val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                                            if (change.position == change.previousPosition) continue
+
+                                            change.consume()
+                                            val newPoint = toImagePoint(change.position)
+                                            val dx = newPoint.x - last.x
+                                            val dy = newPoint.y - last.y
+                                            if (dx * dx + dy * dy >= minStep * minStep) {
+                                                currentStroke.add(newPoint)
+                                                last = newPoint
                                             }
-                                            currentStroke.clear()
-                                        },
-                                        onDragCancel = { currentStroke.clear() }
-                                    )
+                                        }
+
+                                        if (!canceled && currentStroke.isNotEmpty()) {
+                                            callback(currentStroke.toList(), brushSizeNorm)
+                                        }
+                                        currentStroke.clear()
+                                    }
                                 }
                         )
                     }
@@ -4203,7 +4301,10 @@ private fun ImagePreview(
                                 .fillMaxSize()
                                 .pointerInput(isPainting, bitmap) {
                                     awaitEachGesture {
-                                        val down = awaitFirstDown()
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        if (down.type != PointerType.Touch && down.type != PointerType.Stylus) return@awaitEachGesture
+                                        val cancelOnMultiTouch = down.type == PointerType.Touch
+
                                         val sub = activeSubMaskState ?: return@awaitEachGesture
                                         if (sub.aiSubject.maskDataBase64 != null) {
                                             onRequestAiSubjectOverride?.invoke()
@@ -4220,7 +4321,23 @@ private fun ImagePreview(
                                         currentStroke.add(toImagePoint(down.position))
                                         var lastPoint = currentStroke.last()
                                         val minStep = 0.004f
-                                        drag(down.id) { change ->
+                                        var canceled = false
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val pressed = event.changes.filter { it.pressed }
+                                            if (pressed.none { it.id == down.id }) break
+
+                                            if (cancelOnMultiTouch) {
+                                                val touchCount = pressed.count { it.type == PointerType.Touch }
+                                                if (touchCount >= 2) {
+                                                    canceled = true
+                                                    break
+                                                }
+                                            }
+
+                                            val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                                            if (change.position == change.previousPosition) continue
+
                                             change.consume()
                                             val newPoint = toImagePoint(change.position)
                                             val dx = newPoint.x - lastPoint.x
@@ -4231,7 +4348,7 @@ private fun ImagePreview(
                                             }
                                         }
 
-                                        if (currentStroke.size >= 3) callback(currentStroke.toList())
+                                        if (!canceled && currentStroke.size >= 3) callback(currentStroke.toList())
                                         currentStroke.clear()
                                     }
                                 }
