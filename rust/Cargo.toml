@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 image = { version = "0.25.8", default-features = false, features = ["jpeg", "png"] }
 jni = { version = "0.21", features = ["invocation"] }
 log = "0.4"

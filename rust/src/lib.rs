@@ -4,6 +4,7 @@
 mod raw_processing;
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use image::{
     codecs::jpeg::JpegEncoder,
     imageops::FilterType,
@@ -393,6 +394,13 @@ struct LinearMaskParameters {
     end_y: f32,
     #[serde(default = "default_linear_range")]
     range: f32,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct AiSubjectMaskParameters {
+    mask_data_base64: Option<String>,
+    softness: f32,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -1176,12 +1184,111 @@ fn generate_linear_mask(params_value: &Value, width: u32, height: u32) -> Vec<u8
     mask
 }
 
+fn decode_data_url_base64(data_url: &str) -> Option<Vec<u8>> {
+    let idx = data_url.find("base64,")?;
+    let b64 = &data_url[(idx + "base64,".len())..];
+    base64::engine::general_purpose::STANDARD.decode(b64).ok()
+}
+
+fn generate_ai_subject_mask(params_value: &Value, width: u32, height: u32) -> Option<Vec<u8>> {
+    let params: AiSubjectMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
+    let data_url = params.mask_data_base64?;
+    let bytes = decode_data_url_base64(&data_url)?;
+
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    let gray = decoded.to_luma8();
+    let resized = if gray.width() == width && gray.height() == height {
+        gray
+    } else {
+        image::imageops::resize(&gray, width, height, FilterType::Triangle)
+    };
+
+    let mut raw = resized.into_raw();
+
+    let softness = params.softness.clamp(0.0, 1.0);
+    let radius = (softness * 10.0).round() as i32;
+    if radius >= 1 {
+        raw = box_blur_u8(&raw, width as usize, height as usize, radius as usize);
+    }
+
+    Some(raw)
+}
+
+fn box_blur_u8(src: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
+    if radius == 0 || width == 0 || height == 0 {
+        return src.to_vec();
+    }
+    let w = width;
+    let h = height;
+    let r = radius;
+    let mut tmp = vec![0u8; w * h];
+    let mut dst = vec![0u8; w * h];
+
+    // Horizontal pass
+    for y in 0..h {
+        let row = y * w;
+        let denom = (2 * r + 1) as i32;
+        let mut sum: i32 = 0;
+
+        // x = 0 window: replicate edge pixels.
+        sum += src[row] as i32 * (r as i32 + 1);
+        let max_ix = r.min(w - 1);
+        for ix in 1..=max_ix {
+            sum += src[row + ix] as i32;
+        }
+        let repeats = r.saturating_sub(max_ix) as i32;
+        if repeats > 0 {
+            sum += src[row + (w - 1)] as i32 * repeats;
+        }
+        tmp[row] = (sum as f32 / denom as f32).round().clamp(0.0, 255.0) as u8;
+
+        for x in 1..w {
+            let add_x = (x + r).min(w - 1);
+            let sub_x = x.saturating_sub(r + 1);
+            let sub_x = sub_x.min(w - 1);
+            sum += src[row + add_x] as i32;
+            sum -= src[row + sub_x] as i32;
+            tmp[row + x] = (sum as f32 / denom as f32).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    // Vertical pass
+    for x in 0..w {
+        let denom = (2 * r + 1) as i32;
+        let mut sum: i32 = 0;
+
+        // y = 0 window: replicate edge pixels.
+        sum += tmp[x] as i32 * (r as i32 + 1);
+        let max_iy = r.min(h - 1);
+        for iy in 1..=max_iy {
+            sum += tmp[iy * w + x] as i32;
+        }
+        let repeats = r.saturating_sub(max_iy) as i32;
+        if repeats > 0 {
+            sum += tmp[(h - 1) * w + x] as i32 * repeats;
+        }
+        dst[x] = (sum as f32 / denom as f32).round().clamp(0.0, 255.0) as u8;
+
+        for y in 1..h {
+            let add_y = (y + r).min(h - 1);
+            let sub_y = y.saturating_sub(r + 1);
+            let sub_y = sub_y.min(h - 1);
+            sum += tmp[add_y * w + x] as i32;
+            sum -= tmp[sub_y * w + x] as i32;
+            dst[y * w + x] = (sum as f32 / denom as f32).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    dst
+}
+
 fn generate_mask_bitmap(sub_masks: &[SubMaskPayload], width: u32, height: u32) -> Vec<u8> {
     let mut mask = generate_brush_mask(sub_masks, width, height);
     for sub_mask in sub_masks.iter().filter(|s| s.visible) {
         let sub_bitmap = match sub_mask.mask_type.as_str() {
             "radial" => Some(generate_radial_mask(&sub_mask.parameters, width, height)),
             "linear" => Some(generate_linear_mask(&sub_mask.parameters, width, height)),
+            "ai-subject" => generate_ai_subject_mask(&sub_mask.parameters, width, height),
             _ => None,
         };
         if let Some(bitmap) = sub_bitmap {

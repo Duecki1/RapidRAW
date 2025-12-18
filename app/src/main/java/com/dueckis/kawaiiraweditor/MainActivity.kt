@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -395,6 +396,7 @@ private enum class SubMaskType(val id: String) {
     Brush("brush"),
     Linear("linear"),
     Radial("radial"),
+    AiSubject("ai-subject"),
 }
 
 private enum class MaskTapMode {
@@ -402,6 +404,17 @@ private enum class MaskTapMode {
     SetRadialCenter,
     SetLinearStart,
     SetLinearEnd,
+}
+
+private enum class MaskHandle {
+    RadialCenter,
+    LinearStart,
+    LinearEnd,
+}
+
+private enum class BrushTool {
+    Brush,
+    Eraser,
 }
 
 private data class LinearMaskParametersState(
@@ -419,6 +432,11 @@ private data class RadialMaskParametersState(
     val radiusY: Float = 0.35f,
     val rotation: Float = 0f,
     val feather: Float = 0.5f
+)
+
+private data class AiSubjectMaskParametersState(
+    val maskDataBase64: String? = null,
+    val softness: Float = 0.25f
 )
 
 private enum class EditorPanelTab {
@@ -472,7 +490,8 @@ private data class SubMaskState(
     val mode: SubMaskMode = SubMaskMode.Additive,
     val lines: List<BrushLineState> = emptyList(),
     val linear: LinearMaskParametersState = LinearMaskParametersState(),
-    val radial: RadialMaskParametersState = RadialMaskParametersState()
+    val radial: RadialMaskParametersState = RadialMaskParametersState(),
+    val aiSubject: AiSubjectMaskParametersState = AiSubjectMaskParametersState()
 )
 
 private data class MaskState(
@@ -559,6 +578,11 @@ private fun SubMaskState.toJsonObject(): JSONObject {
                     put("feather", radial.feather)
                 }
 
+                SubMaskType.AiSubject.id -> JSONObject().apply {
+                    aiSubject.maskDataBase64?.let { put("maskDataBase64", it) }
+                    put("softness", aiSubject.softness.coerceIn(0f, 1f))
+                }
+
                 else -> JSONObject()
             }
         )
@@ -569,6 +593,7 @@ private data class BrushEvent(
     val order: Long,
     val mode: SubMaskMode,
     val brushSize: Float,
+    val feather: Float,
     val points: List<MaskPoint>
 )
 
@@ -582,9 +607,40 @@ private fun buildMaskOverlayBitmap(mask: MaskState, targetWidth: Int, targetHeig
         return if (value <= 1.5f) (value * maxCoord).coerceIn(0f, maxCoord) else value
     }
 
+    fun lenPx(value: Float): Float {
+        return if (value <= 1.5f) (value * baseDim).coerceAtLeast(0f) else value
+    }
+
+    fun applyPixel(mode: SubMaskMode, current: Int, intensity: Int): Int {
+        return when (mode) {
+            SubMaskMode.Additive -> maxOf(current, intensity)
+            SubMaskMode.Subtractive -> {
+                val currentF = current / 255f
+                val intensityF = intensity / 255f
+                ((currentF * (1f - intensityF)).coerceIn(0f, 1f) * 255f).roundToInt()
+            }
+        }
+    }
+
+    fun circleIntensity(dist: Float, radius: Float, feather: Float): Int {
+        if (radius <= 0.5f) return 0
+        val featherClamped = feather.coerceIn(0f, 1f)
+        if (featherClamped <= 0.0001f) {
+            return if (dist <= radius) 255 else 0
+        }
+        val inner = radius * (1f - featherClamped)
+        if (dist <= inner) return 255
+        if (dist >= radius) return 0
+        val t = (dist - inner) / (radius - inner).coerceAtLeast(0.001f)
+        return ((1f - t).coerceIn(0f, 1f) * 255f).roundToInt()
+    }
+
+    val selection = IntArray(width * height) { 0 }
+
     val events = buildList {
         mask.subMasks.forEach { sub ->
             if (!sub.visible) return@forEach
+            if (sub.type != SubMaskType.Brush.id) return@forEach
             sub.lines.forEach { line ->
                 val effectiveMode =
                     if (line.tool == "eraser") SubMaskMode.Subtractive else sub.mode
@@ -593,6 +649,7 @@ private fun buildMaskOverlayBitmap(mask: MaskState, targetWidth: Int, targetHeig
                         order = line.order,
                         mode = effectiveMode,
                         brushSize = line.brushSize,
+                        feather = line.feather,
                         points = line.points
                     )
                 )
@@ -600,74 +657,94 @@ private fun buildMaskOverlayBitmap(mask: MaskState, targetWidth: Int, targetHeig
         }
     }.sortedBy { it.order }
 
-    val overlay = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val canvas = android.graphics.Canvas(overlay)
-    canvas.drawColor(android.graphics.Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-
-    val addPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.argb(140, 255, 23, 68) // red overlay
-        style = android.graphics.Paint.Style.STROKE
-        strokeCap = android.graphics.Paint.Cap.ROUND
-        strokeJoin = android.graphics.Paint.Join.ROUND
+    fun applyCircle(mode: SubMaskMode, cx: Float, cy: Float, radius: Float, feather: Float) {
+        val x0 = (cx - radius - 1f).toInt().coerceAtLeast(0)
+        val y0 = (cy - radius - 1f).toInt().coerceAtLeast(0)
+        val x1 = (cx + radius + 1f).toInt().coerceAtMost(width - 1)
+        val y1 = (cy + radius + 1f).toInt().coerceAtMost(height - 1)
+        for (y in y0..y1) {
+            val dy = y + 0.5f - cy
+            val row = y * width
+            for (x in x0..x1) {
+                val dx = x + 0.5f - cx
+                val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                val intensity = circleIntensity(dist, radius, feather)
+                if (intensity == 0) continue
+                val idx = row + x
+                selection[idx] = applyPixel(mode, selection[idx], intensity)
+            }
+        }
     }
-    val subPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-        style = android.graphics.Paint.Style.STROKE
-        strokeCap = android.graphics.Paint.Cap.ROUND
-        strokeJoin = android.graphics.Paint.Join.ROUND
+
+    fun brushRadiusPx(brushSizeRaw: Float): Float {
+        val px = if (brushSizeRaw <= 1.5f) brushSizeRaw * baseDim else brushSizeRaw
+        return (px / 2f).coerceAtLeast(1f)
     }
 
-    fun brushPx(brushSizeRaw: Float): Float {
-        return if (brushSizeRaw <= 1.5f) (brushSizeRaw * baseDim).coerceAtLeast(1f) else brushSizeRaw
+    fun denormPoint(p: MaskPoint): Pair<Float, Float> {
+        return denorm(p.x, width) to denorm(p.y, height)
     }
 
     events.forEach { event ->
-        val paint = if (event.mode == SubMaskMode.Additive) addPaint else subPaint
-        paint.strokeWidth = brushPx(event.brushSize)
-
         if (event.points.isEmpty()) return@forEach
+        val radius = brushRadiusPx(event.brushSize)
+        val feather = event.feather.coerceIn(0f, 1f)
         if (event.points.size == 1) {
-            val p = event.points[0]
-            val x = denorm(p.x, width)
-            val y = denorm(p.y, height)
-            canvas.drawCircle(x, y, paint.strokeWidth / 2f, paint)
+            val (x, y) = denormPoint(event.points[0])
+            applyCircle(event.mode, x, y, radius, feather)
             return@forEach
         }
 
-        val path = android.graphics.Path()
-        val first = event.points.first()
-        path.moveTo(denorm(first.x, width), denorm(first.y, height))
-        event.points.drop(1).forEach { p ->
-            path.lineTo(denorm(p.x, width), denorm(p.y, height))
+        val step = (radius * 0.5f).coerceAtLeast(0.75f)
+        event.points.windowed(2, 1, false).forEach { (p0, p1) ->
+            val (x0, y0) = denormPoint(p0)
+            val (x1, y1) = denormPoint(p1)
+            val dx = x1 - x0
+            val dy = y1 - y0
+            val dist = kotlin.math.sqrt(dx * dx + dy * dy).coerceAtLeast(0.001f)
+            val steps = (dist / step).roundToInt().coerceAtLeast(1)
+            for (i in 0..steps) {
+                val t = i.toFloat() / steps.toFloat()
+                applyCircle(event.mode, x0 + dx * t, y0 + dy * t, radius, feather)
+            }
         }
-        canvas.drawPath(path, paint)
-    }
-
-    fun lenPx(value: Float): Float {
-        return if (value <= 1.5f) (value * baseDim).coerceAtLeast(0f) else value
-    }
-
-    val addFill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.argb(90, 255, 23, 68)
-        style = android.graphics.Paint.Style.FILL
-    }
-    val subFill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-        style = android.graphics.Paint.Style.FILL
     }
 
     mask.subMasks.forEach { sub ->
         if (!sub.visible) return@forEach
-        val fill = if (sub.mode == SubMaskMode.Additive) addFill else subFill
         when (sub.type) {
             SubMaskType.Radial.id -> {
                 val cx = denorm(sub.radial.centerX, width)
                 val cy = denorm(sub.radial.centerY, height)
-                val rx = lenPx(sub.radial.radiusX)
-                val ry = lenPx(sub.radial.radiusY)
-                if (rx <= 0.5f || ry <= 0.5f) return@forEach
-                val rect = android.graphics.RectF(cx - rx, cy - ry, cx + rx, cy + ry)
-                canvas.drawOval(rect, fill)
+                val rx = lenPx(sub.radial.radiusX).coerceAtLeast(0.01f)
+                val ry = lenPx(sub.radial.radiusY).coerceAtLeast(0.01f)
+                val feather = sub.radial.feather.coerceIn(0f, 1f)
+                val innerBound = (1f - feather).coerceIn(0f, 1f)
+                val rotation = sub.radial.rotation * (Math.PI.toFloat() / 180f)
+                val cosRot = kotlin.math.cos(rotation)
+                val sinRot = kotlin.math.sin(rotation)
+
+                for (y in 0 until height) {
+                    val row = y * width
+                    for (x in 0 until width) {
+                        val dx = x + 0.5f - cx
+                        val dy = y + 0.5f - cy
+                        val rotDx = dx * cosRot + dy * sinRot
+                        val rotDy = -dx * sinRot + dy * cosRot
+                        val nx = rotDx / rx
+                        val ny = rotDy / ry
+                        val dist = kotlin.math.sqrt(nx * nx + ny * ny)
+                        val intensityF = if (dist <= innerBound) {
+                            1f
+                        } else {
+                            1f - (dist - innerBound) / (1f - innerBound).coerceAtLeast(0.01f)
+                        }
+                        val intensity = (intensityF.coerceIn(0f, 1f) * 255f).roundToInt()
+                        if (intensity == 0) continue
+                        val idx = row + x
+                        selection[idx] = applyPixel(sub.mode, selection[idx], intensity)
+                    }
+                }
             }
 
             SubMaskType.Linear.id -> {
@@ -675,25 +752,117 @@ private fun buildMaskOverlayBitmap(mask: MaskState, targetWidth: Int, targetHeig
                 val sy = denorm(sub.linear.startY, height)
                 val ex = denorm(sub.linear.endX, width)
                 val ey = denorm(sub.linear.endY, height)
-                val dx = ex - sx
-                val dy = ey - sy
-                val len = kotlin.math.sqrt(dx * dx + dy * dy).coerceAtLeast(0.001f)
-                val nx = -dy / len
-                val ny = dx / len
-                val half = lenPx(sub.linear.range)
-                val path = android.graphics.Path().apply {
-                    moveTo(sx + nx * half, sy + ny * half)
-                    lineTo(ex + nx * half, ey + ny * half)
-                    lineTo(ex - nx * half, ey - ny * half)
-                    lineTo(sx - nx * half, sy - ny * half)
-                    close()
+                val rangePx = lenPx(sub.linear.range).coerceAtLeast(0.01f)
+                val vx = ex - sx
+                val vy = ey - sy
+                val len = kotlin.math.sqrt(vx * vx + vy * vy)
+                if (len <= 0.01f) return@forEach
+                val invLen = 1f / len
+                val nx = -vy * invLen
+                val ny = vx * invLen
+
+                for (y in 0 until height) {
+                    val row = y * width
+                    for (x in 0 until width) {
+                        val px = x + 0.5f - sx
+                        val py = y + 0.5f - sy
+                        val distPerp = px * nx + py * ny
+                        val t = distPerp / rangePx
+                        val intensityF = (0.5f - t * 0.5f).coerceIn(0f, 1f)
+                        val intensity = (intensityF * 255f).roundToInt()
+                        if (intensity == 0) continue
+                        val idx = row + x
+                        selection[idx] = applyPixel(sub.mode, selection[idx], intensity)
+                    }
                 }
-                canvas.drawPath(path, fill)
             }
         }
     }
 
-    return overlay
+    fun decodeMaskDataUrlToBitmap(dataUrl: String): Bitmap? {
+        val idx = dataUrl.indexOf("base64,")
+        if (idx < 0) return null
+        return try {
+            val b64 = dataUrl.substring(idx + "base64,".length)
+            val bytes = Base64.decode(b64, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun boxBlurU8(src: IntArray, radius: Int): IntArray {
+        if (radius <= 0) return src
+        val r = radius
+        val denom = (2 * r + 1).toFloat()
+        val tmp = IntArray(src.size)
+        val dst = IntArray(src.size)
+
+        // Horizontal
+        for (y in 0 until height) {
+            val row = y * width
+            var sum = 0
+            sum += src[row] * (r + 1)
+            for (ix in 1..minOf(r, width - 1)) sum += src[row + ix]
+            for (ix in (minOf(r, width - 1) + 1)..r) sum += src[row + (width - 1)]
+            tmp[row] = (sum / denom).roundToInt().coerceIn(0, 255)
+            for (x in 1 until width) {
+                val addX = minOf(x + r, width - 1)
+                val subX = maxOf(x - r - 1, 0)
+                sum += src[row + addX]
+                sum -= src[row + subX]
+                tmp[row + x] = (sum / denom).roundToInt().coerceIn(0, 255)
+            }
+        }
+
+        // Vertical
+        for (x in 0 until width) {
+            var sum = 0
+            sum += tmp[x] * (r + 1)
+            for (iy in 1..minOf(r, height - 1)) sum += tmp[iy * width + x]
+            for (iy in (minOf(r, height - 1) + 1)..r) sum += tmp[(height - 1) * width + x]
+            dst[x] = (sum / denom).roundToInt().coerceIn(0, 255)
+            for (y in 1 until height) {
+                val addY = minOf(y + r, height - 1)
+                val subY = maxOf(y - r - 1, 0)
+                sum += tmp[addY * width + x]
+                sum -= tmp[subY * width + x]
+                dst[y * width + x] = (sum / denom).roundToInt().coerceIn(0, 255)
+            }
+        }
+        return dst
+    }
+
+    mask.subMasks.forEach { sub ->
+        if (!sub.visible) return@forEach
+        if (sub.type != SubMaskType.AiSubject.id) return@forEach
+        val dataUrl = sub.aiSubject.maskDataBase64 ?: return@forEach
+        val decoded = decodeMaskDataUrlToBitmap(dataUrl) ?: return@forEach
+        val scaled = if (decoded.width != width || decoded.height != height) {
+            Bitmap.createScaledBitmap(decoded, width, height, true)
+        } else {
+            decoded
+        }
+        val pixels = IntArray(width * height)
+        scaled.getPixels(pixels, 0, width, 0, 0, width, height)
+        val maskU8 = IntArray(width * height) { i -> (pixels[i] shr 16) and 0xFF }
+        val radius = (sub.aiSubject.softness.coerceIn(0f, 1f) * 10f).roundToInt()
+        val softened = if (radius >= 1) boxBlurU8(maskU8, radius) else maskU8
+        for (i in softened.indices) {
+            val v = softened[i]
+            if (v == 0) continue
+            selection[i] = applyPixel(sub.mode, selection[i], v)
+        }
+    }
+
+    val overlayPixels = IntArray(width * height)
+    for (i in overlayPixels.indices) {
+        val v = selection[i].coerceIn(0, 255)
+        if (v == 0) continue
+        val a = (v * 140 / 255).coerceIn(0, 255)
+        overlayPixels[i] = (a shl 24) or (255 shl 16) or (23 shl 8) or 68
+    }
+    return Bitmap.createBitmap(overlayPixels, width, height, Bitmap.Config.ARGB_8888)
 }
 
 private data class AdjustmentControl(
@@ -1029,6 +1198,7 @@ private fun EditorScreen(
     val context = LocalContext.current
     val storage = remember { ProjectStorage(context) }
     val scrollState = rememberScrollState()
+    val coroutineScope = rememberCoroutineScope()
     val configuration = LocalConfiguration.current
     val isTablet = configuration.screenWidthDp >= 600
 
@@ -1038,11 +1208,15 @@ private fun EditorScreen(
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var histogramData by remember { mutableStateOf<HistogramData?>(null) }
     var isLoading by remember { mutableStateOf(false) }
+    var isGeneratingAiMask by remember { mutableStateOf(false) }
+    var isDraggingMaskHandle by remember { mutableStateOf(false) }
     var isExporting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var showMetadataDialog by remember { mutableStateOf(false) }
     var metadataJson by remember { mutableStateOf<String?>(null) }
+    var showAiSubjectOverrideDialog by remember { mutableStateOf(false) }
+    var aiSubjectOverrideTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     var panelTab by remember { mutableStateOf(EditorPanelTab.Adjustments) }
     var selectedMaskId by remember { mutableStateOf<String?>(null) }
@@ -1050,6 +1224,9 @@ private fun EditorScreen(
     var isPaintingMask by remember { mutableStateOf(false) }
     var maskTapMode by remember { mutableStateOf(MaskTapMode.None) }
     var brushSize by remember { mutableStateOf(60f) }
+    var brushTool by remember { mutableStateOf(BrushTool.Brush) }
+    var brushSoftness by remember { mutableStateOf(0.5f) }
+    var eraserSoftness by remember { mutableStateOf(0.5f) }
     var showMaskOverlay by remember { mutableStateOf(true) }
     val strokeOrder = remember { AtomicLong(0L) }
 
@@ -1241,6 +1418,20 @@ private fun EditorScreen(
                                 )
                             }
 
+                            SubMaskType.AiSubject.id -> {
+                                SubMaskState(
+                                    id = subId,
+                                    type = SubMaskType.AiSubject.id,
+                                    visible = visible,
+                                    mode = mode,
+                                    aiSubject = AiSubjectMaskParametersState(
+                                        maskDataBase64 = paramsObj.optString("maskDataBase64")
+                                            .takeIf { it.isNotBlank() },
+                                        softness = paramsObj.optDouble("softness", 0.25).toFloat().coerceIn(0f, 1f)
+                                    )
+                                )
+                            }
+
                             else -> {
                                 val linesArr = paramsObj.optJSONArray("lines") ?: JSONArray()
                                 val lines = (0 until linesArr.length()).mapNotNull { lIdx ->
@@ -1320,7 +1511,8 @@ private fun EditorScreen(
         histogramData = withContext(Dispatchers.Default) { calculateHistogram(bmp) }
     }
 
-    LaunchedEffect(adjustments, masks) {
+    LaunchedEffect(adjustments, masks, isDraggingMaskHandle) {
+        if (isDraggingMaskHandle) return@LaunchedEffect
         val json = withContext(Dispatchers.Default) { adjustments.toJson(masks) }
         val version = renderVersion.incrementAndGet()
         renderRequests.trySend(RenderRequest(version = version, adjustmentsJson = json))
@@ -1431,9 +1623,9 @@ private fun EditorScreen(
     val selectedMaskForOverlay = masks.firstOrNull { it.id == selectedMaskId }
     val selectedSubMaskForEdit = selectedMaskForOverlay?.subMasks?.firstOrNull { it.id == selectedSubMaskId }
     val isMaskMode = panelTab == EditorPanelTab.Masks
-    val isPaintingEnabled =
+    val isInteractiveMaskingEnabled =
         isMaskMode && isPaintingMask && selectedMaskId != null && selectedSubMaskId != null &&
-            selectedSubMaskForEdit?.type == SubMaskType.Brush.id
+            (selectedSubMaskForEdit?.type == SubMaskType.Brush.id || selectedSubMaskForEdit?.type == SubMaskType.AiSubject.id)
 
     val onMaskTap: ((MaskPoint) -> Unit)? =
         if (!isMaskMode || maskTapMode == MaskTapMode.None) null
@@ -1475,9 +1667,9 @@ private fun EditorScreen(
         val subId = selectedSubMaskId ?: return@onBrush
         if (points.isEmpty()) return@onBrush
         val newLine = BrushLineState(
-            tool = "brush",
+            tool = if (brushTool == BrushTool.Eraser) "eraser" else "brush",
             brushSize = brushSizeNorm,
-            feather = 0.5f,
+            feather = if (brushTool == BrushTool.Eraser) eraserSoftness else brushSoftness,
             order = strokeOrder.incrementAndGet(),
             points = points
         )
@@ -1490,6 +1682,70 @@ private fun EditorScreen(
             )
         }
         showMaskOverlay = true
+    }
+
+    val onSubMaskHandleDrag: (MaskHandle, MaskPoint) -> Unit = onDrag@{ handle, point ->
+        val maskId = selectedMaskId ?: return@onDrag
+        val subId = selectedSubMaskId ?: return@onDrag
+        masks = masks.map { mask ->
+            if (mask.id != maskId) return@map mask
+            mask.copy(
+                subMasks = mask.subMasks.map { sub ->
+                    if (sub.id != subId) return@map sub
+                    when (handle) {
+                        MaskHandle.RadialCenter ->
+                            if (sub.type != SubMaskType.Radial.id) sub
+                            else sub.copy(radial = sub.radial.copy(centerX = point.x, centerY = point.y))
+
+                        MaskHandle.LinearStart ->
+                            if (sub.type != SubMaskType.Linear.id) sub
+                            else sub.copy(linear = sub.linear.copy(startX = point.x, startY = point.y))
+
+                        MaskHandle.LinearEnd ->
+                            if (sub.type != SubMaskType.Linear.id) sub
+                            else sub.copy(linear = sub.linear.copy(endX = point.x, endY = point.y))
+                    }
+                }
+            )
+        }
+        showMaskOverlay = true
+    }
+
+    val aiSubjectMaskGenerator = remember { AiSubjectMaskGenerator(context) }
+    val onLassoFinished: (List<MaskPoint>) -> Unit = onLasso@{ points ->
+        val maskId = selectedMaskId ?: return@onLasso
+        val subId = selectedSubMaskId ?: return@onLasso
+        val bmp = previewBitmap ?: return@onLasso
+        if (points.size < 3) return@onLasso
+
+        coroutineScope.launch {
+            isGeneratingAiMask = true
+            statusMessage = "Generating subject mask\u2026"
+            val dataUrl = runCatching {
+                aiSubjectMaskGenerator.generateSubjectMaskDataUrl(
+                    previewBitmap = bmp,
+                    lassoPoints = points.map { NormalizedPoint(it.x, it.y) }
+                )
+            }.getOrNull()
+
+            if (dataUrl == null) {
+                statusMessage = "Failed to generate subject mask."
+            } else {
+                masks = masks.map { mask ->
+                    if (mask.id != maskId) return@map mask
+                    mask.copy(
+                        subMasks = mask.subMasks.map { sub ->
+                            if (sub.id != subId) sub else sub.copy(aiSubject = sub.aiSubject.copy(maskDataBase64 = dataUrl))
+                        }
+                    )
+                }
+                showMaskOverlay = true
+                statusMessage = "Subject mask added."
+            }
+            isGeneratingAiMask = false
+            delay(1500)
+            if (statusMessage == "Subject mask added.") statusMessage = null
+        }
     }
 
     Surface(modifier = Modifier.fillMaxSize()) {
@@ -1508,16 +1764,27 @@ private fun EditorScreen(
                         ) {
                             ImagePreview(
                                 bitmap = previewBitmap,
-                                isLoading = isLoading,
+                                isLoading = isLoading || isGeneratingAiMask,
                                 maskOverlay = selectedMaskForOverlay,
                                 activeSubMask = selectedSubMaskForEdit,
                                 isMaskMode = isMaskMode,
                                 showMaskOverlay = showMaskOverlay,
-                                isPainting = isPaintingEnabled,
+                                isPainting = isInteractiveMaskingEnabled,
                                 brushSize = brushSize,
                                 maskTapMode = maskTapMode,
                                 onMaskTap = onMaskTap,
-                                onBrushStrokeFinished = onBrushStrokeFinished
+                                onBrushStrokeFinished = onBrushStrokeFinished,
+                                onLassoFinished = onLassoFinished,
+                                onSubMaskHandleDrag = onSubMaskHandleDrag,
+                                onSubMaskHandleDragStateChange = { isDraggingMaskHandle = it },
+                                onRequestAiSubjectOverride = {
+                                    val maskId = selectedMaskId
+                                    val subId = selectedSubMaskId
+                                    if (maskId != null && subId != null) {
+                                        aiSubjectOverrideTarget = maskId to subId
+                                        showAiSubjectOverrideDialog = true
+                                    }
+                                }
                             )
                         }
 
@@ -1556,6 +1823,12 @@ private fun EditorScreen(
                                     onShowMaskOverlayChange = { showMaskOverlay = it },
                                     brushSize = brushSize,
                                     onBrushSizeChange = { brushSize = it },
+                                    brushTool = brushTool,
+                                    onBrushToolChange = { brushTool = it },
+                                    brushSoftness = brushSoftness,
+                                    onBrushSoftnessChange = { brushSoftness = it },
+                                    eraserSoftness = eraserSoftness,
+                                    onEraserSoftnessChange = { eraserSoftness = it },
                                     maskTapMode = maskTapMode,
                                     onMaskTapModeChange = { maskTapMode = it }
                                 )
@@ -1712,16 +1985,27 @@ private fun EditorScreen(
                     ) {
                         ImagePreview(
                             bitmap = previewBitmap,
-                            isLoading = isLoading,
+                            isLoading = isLoading || isGeneratingAiMask,
                             maskOverlay = selectedMaskForOverlay,
                             activeSubMask = selectedSubMaskForEdit,
                             isMaskMode = isMaskMode,
                             showMaskOverlay = showMaskOverlay,
-                            isPainting = isPaintingEnabled,
+                            isPainting = isInteractiveMaskingEnabled,
                             brushSize = brushSize,
                             maskTapMode = maskTapMode,
                             onMaskTap = onMaskTap,
-                            onBrushStrokeFinished = onBrushStrokeFinished
+                            onBrushStrokeFinished = onBrushStrokeFinished,
+                            onLassoFinished = onLassoFinished,
+                            onSubMaskHandleDrag = onSubMaskHandleDrag,
+                            onSubMaskHandleDragStateChange = { isDraggingMaskHandle = it },
+                            onRequestAiSubjectOverride = {
+                                val maskId = selectedMaskId
+                                val subId = selectedSubMaskId
+                                if (maskId != null && subId != null) {
+                                    aiSubjectOverrideTarget = maskId to subId
+                                    showAiSubjectOverrideDialog = true
+                                }
+                            }
                         )
                     }
 
@@ -1801,6 +2085,12 @@ private fun EditorScreen(
                                 onShowMaskOverlayChange = { showMaskOverlay = it },
                                 brushSize = brushSize,
                                 onBrushSizeChange = { brushSize = it },
+                                brushTool = brushTool,
+                                onBrushToolChange = { brushTool = it },
+                                brushSoftness = brushSoftness,
+                                onBrushSoftnessChange = { brushSoftness = it },
+                                eraserSoftness = eraserSoftness,
+                                onEraserSoftnessChange = { eraserSoftness = it },
                                 maskTapMode = maskTapMode,
                                 onMaskTapModeChange = { maskTapMode = it }
                             )
@@ -1874,6 +2164,47 @@ private fun EditorScreen(
                     }
                 }
             }
+        )
+    }
+
+    if (showAiSubjectOverrideDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showAiSubjectOverrideDialog = false
+                aiSubjectOverrideTarget = null
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val target = aiSubjectOverrideTarget
+                        if (target != null) {
+                            val (maskId, subId) = target
+                            masks = masks.map { mask ->
+                                if (mask.id != maskId) return@map mask
+                                mask.copy(
+                                    subMasks = mask.subMasks.map { sub ->
+                                        if (sub.id != subId) sub else sub.copy(aiSubject = sub.aiSubject.copy(maskDataBase64 = null))
+                                    }
+                                )
+                            }
+                            showMaskOverlay = true
+                            statusMessage = "Cleared subject mask. Draw a new one."
+                        }
+                        showAiSubjectOverrideDialog = false
+                        aiSubjectOverrideTarget = null
+                    }
+                ) { Text("Replace") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showAiSubjectOverrideDialog = false
+                        aiSubjectOverrideTarget = null
+                    }
+                ) { Text("Cancel") }
+            },
+            title = { Text("Replace subject mask?") },
+            text = { Text("This will delete the current subject mask so you can draw a new one.") }
         )
     }
 }
@@ -1950,6 +2281,12 @@ private fun TabbedEditorControls(
     onShowMaskOverlayChange: (Boolean) -> Unit,
     brushSize: Float,
     onBrushSizeChange: (Float) -> Unit,
+    brushTool: BrushTool,
+    onBrushToolChange: (BrushTool) -> Unit,
+    brushSoftness: Float,
+    onBrushSoftnessChange: (Float) -> Unit,
+    eraserSoftness: Float,
+    onEraserSoftnessChange: (Float) -> Unit,
     maskTapMode: MaskTapMode,
     onMaskTapModeChange: (MaskTapMode) -> Unit
 ) {
@@ -2047,6 +2384,7 @@ private fun TabbedEditorControls(
                     SubMaskType.Brush -> SubMaskState(id = id, type = type.id, mode = mode)
                     SubMaskType.Linear -> SubMaskState(id = id, type = type.id, mode = mode, linear = LinearMaskParametersState())
                     SubMaskType.Radial -> SubMaskState(id = id, type = type.id, mode = mode, radial = RadialMaskParametersState())
+                    SubMaskType.AiSubject -> SubMaskState(id = id, type = type.id, mode = mode, aiSubject = AiSubjectMaskParametersState())
                 }
             }
 
@@ -2062,9 +2400,18 @@ private fun TabbedEditorControls(
                     expanded = showAddMaskMenu,
                     onDismissRequest = { showAddMaskMenu = false }
                 ) {
-                    listOf(SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
+                    listOf(SubMaskType.AiSubject, SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
                         DropdownMenuItem(
-                            text = { Text(type.name.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }) },
+                            text = {
+                                Text(
+                                    when (type) {
+                                        SubMaskType.AiSubject -> "Subject"
+                                        SubMaskType.Brush -> "Brush"
+                                        SubMaskType.Linear -> "Gradient"
+                                        SubMaskType.Radial -> "Radial"
+                                    }
+                                )
+                            },
                             onClick = {
                                 showAddMaskMenu = false
                                 onMaskTapModeChange(MaskTapMode.None)
@@ -2078,7 +2425,7 @@ private fun TabbedEditorControls(
                                 onMasksChange(masks + newMask)
                                 onSelectedMaskIdChange(newMaskId)
                                 onSelectedSubMaskIdChange(newSubId)
-                                onPaintingMaskChange(type == SubMaskType.Brush)
+                                onPaintingMaskChange(type == SubMaskType.Brush || type == SubMaskType.AiSubject)
                             }
                         )
                     }
@@ -2237,9 +2584,18 @@ private fun TabbedEditorControls(
                         expanded = showAddSubMenu,
                         onDismissRequest = { showAddSubMenu = false }
                     ) {
-                        listOf(SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
+                        listOf(SubMaskType.AiSubject, SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
                             DropdownMenuItem(
-                                text = { Text(type.name.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }) },
+                                text = {
+                                    Text(
+                                        when (type) {
+                                            SubMaskType.AiSubject -> "Subject"
+                                            SubMaskType.Brush -> "Brush"
+                                            SubMaskType.Linear -> "Gradient"
+                                            SubMaskType.Radial -> "Radial"
+                                        }
+                                    )
+                                },
                                 onClick = {
                                     showAddSubMenu = false
                                     onMaskTapModeChange(MaskTapMode.None)
@@ -2250,7 +2606,7 @@ private fun TabbedEditorControls(
                                     }
                                     onMasksChange(updated)
                                     onSelectedSubMaskIdChange(newSubId)
-                                    onPaintingMaskChange(type == SubMaskType.Brush)
+                                    onPaintingMaskChange(type == SubMaskType.Brush || type == SubMaskType.AiSubject)
                                 }
                             )
                         }
@@ -2266,9 +2622,18 @@ private fun TabbedEditorControls(
                         expanded = showSubSubMenu,
                         onDismissRequest = { showSubSubMenu = false }
                     ) {
-                        listOf(SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
+                        listOf(SubMaskType.AiSubject, SubMaskType.Brush, SubMaskType.Linear, SubMaskType.Radial).forEach { type ->
                             DropdownMenuItem(
-                                text = { Text(type.name.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }) },
+                                text = {
+                                    Text(
+                                        when (type) {
+                                            SubMaskType.AiSubject -> "Subject"
+                                            SubMaskType.Brush -> "Brush"
+                                            SubMaskType.Linear -> "Gradient"
+                                            SubMaskType.Radial -> "Radial"
+                                        }
+                                    )
+                                },
                                 onClick = {
                                     showSubSubMenu = false
                                     onMaskTapModeChange(MaskTapMode.None)
@@ -2279,7 +2644,7 @@ private fun TabbedEditorControls(
                                     }
                                     onMasksChange(updated)
                                     onSelectedSubMaskIdChange(newSubId)
-                                    onPaintingMaskChange(type == SubMaskType.Brush)
+                                    onPaintingMaskChange(type == SubMaskType.Brush || type == SubMaskType.AiSubject)
                                 }
                             )
                         }
@@ -2323,6 +2688,7 @@ private fun TabbedEditorControls(
                                     append(" ")
                                     append(
                                         when (sub.type) {
+                                            SubMaskType.AiSubject.id -> "Subject"
                                             SubMaskType.Linear.id -> "Gradient"
                                             SubMaskType.Radial.id -> "Radial"
                                             else -> "Brush"
@@ -2334,7 +2700,7 @@ private fun TabbedEditorControls(
                                     .clickable {
                                         onMaskTapModeChange(MaskTapMode.None)
                                         onSelectedSubMaskIdChange(sub.id)
-                                        onPaintingMaskChange(sub.type == SubMaskType.Brush.id)
+                                        onPaintingMaskChange(sub.type == SubMaskType.Brush.id || sub.type == SubMaskType.AiSubject.id)
                                     },
                                 color = MaterialTheme.colorScheme.onSurface,
                                 fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
@@ -2369,25 +2735,41 @@ private fun TabbedEditorControls(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (selectedSubMask?.type == SubMaskType.Brush.id) {
-                    Text("Paint", color = MaterialTheme.colorScheme.onSurface)
-                    Checkbox(
-                        checked = isPaintingMask,
-                        onCheckedChange = { checked ->
-                            onMaskTapModeChange(MaskTapMode.None)
-                            onPaintingMaskChange(checked)
-                            if (checked) onShowMaskOverlayChange(true)
-                        }
-                    )
-                } else {
-                    Text(
-                        text = when (selectedSubMask?.type) {
-                            SubMaskType.Linear.id -> "Gradient"
-                            SubMaskType.Radial.id -> "Radial"
-                            else -> "Mask"
-                        },
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                when (selectedSubMask?.type) {
+                    SubMaskType.Brush.id -> {
+                        Text("Paint", color = MaterialTheme.colorScheme.onSurface)
+                        Checkbox(
+                            checked = isPaintingMask,
+                            onCheckedChange = { checked ->
+                                onMaskTapModeChange(MaskTapMode.None)
+                                onPaintingMaskChange(checked)
+                                if (checked) onShowMaskOverlayChange(true)
+                            }
+                        )
+                    }
+
+                    SubMaskType.AiSubject.id -> {
+                        Text("Lasso", color = MaterialTheme.colorScheme.onSurface)
+                        Checkbox(
+                            checked = isPaintingMask,
+                            onCheckedChange = { checked ->
+                                onMaskTapModeChange(MaskTapMode.None)
+                                onPaintingMaskChange(checked)
+                                if (checked) onShowMaskOverlayChange(true)
+                            }
+                        )
+                    }
+
+                    else -> {
+                        Text(
+                            text = when (selectedSubMask?.type) {
+                                SubMaskType.Linear.id -> "Gradient"
+                                SubMaskType.Radial.id -> "Radial"
+                                else -> "Mask"
+                            },
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             }
 
@@ -2430,12 +2812,94 @@ private fun TabbedEditorControls(
 
             when (selectedSubMask.type) {
                 SubMaskType.Brush.id -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = { onBrushToolChange(BrushTool.Brush) },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = if (brushTool == BrushTool.Brush)
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                else
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                            )
+                        ) { Text("Brush") }
+                        FilledTonalButton(
+                            onClick = { onBrushToolChange(BrushTool.Eraser) },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = if (brushTool == BrushTool.Eraser)
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                else
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                            )
+                        ) { Text("Eraser") }
+                    }
+
                     Text("Brush Size: ${brushSize.roundToInt()} px", color = MaterialTheme.colorScheme.onSurface)
                     Slider(
                         value = brushSize.coerceIn(2f, 400f),
                         onValueChange = { onBrushSizeChange(it) },
                         valueRange = 2f..400f
                     )
+
+                    val softness = if (brushTool == BrushTool.Eraser) eraserSoftness else brushSoftness
+                    Text("Softness: ${(softness * 100f).roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
+                    Slider(
+                        value = softness.coerceIn(0f, 1f),
+                        onValueChange = { newValue ->
+                            if (brushTool == BrushTool.Eraser) onEraserSoftnessChange(newValue.coerceIn(0f, 1f))
+                            else onBrushSoftnessChange(newValue.coerceIn(0f, 1f))
+                        },
+                        valueRange = 0f..1f
+                    )
+                }
+
+                SubMaskType.AiSubject.id -> {
+                    Text(
+                        text = "Draw around your subject to generate an AI mask.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Text(
+                        text = "Softness: ${(selectedSubMask.aiSubject.softness.coerceIn(0f, 1f) * 100f).roundToInt()}%",
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Slider(
+                        value = selectedSubMask.aiSubject.softness.coerceIn(0f, 1f),
+                        onValueChange = { newValue ->
+                            val updated = masks.map { m ->
+                                if (m.id != selectedMask.id) m
+                                else m.copy(
+                                    subMasks = m.subMasks.map { s ->
+                                        if (s.id != selectedSubMask.id) s else s.copy(aiSubject = s.aiSubject.copy(softness = newValue.coerceIn(0f, 1f)))
+                                    }
+                                )
+                            }
+                            onMasksChange(updated)
+                            onShowMaskOverlayChange(true)
+                        },
+                        valueRange = 0f..1f
+                    )
+
+                    FilledTonalButton(
+                        onClick = {
+                            val updated = masks.map { m ->
+                                if (m.id != selectedMask.id) m
+                                else m.copy(
+                                    subMasks = m.subMasks.map { s ->
+                                        if (s.id != selectedSubMask.id) s else s.copy(aiSubject = s.aiSubject.copy(maskDataBase64 = null))
+                                    }
+                                )
+                            }
+                            onMasksChange(updated)
+                            onShowMaskOverlayChange(true)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Clear AI Mask") }
                 }
 
                 SubMaskType.Radial.id -> {
@@ -2465,7 +2929,7 @@ private fun TabbedEditorControls(
                         valueRange = 0.01f..1.5f
                     )
 
-                    Text("Feather: ${(selectedSubMask.radial.feather * 100f).roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
+                    Text("Softness: ${(selectedSubMask.radial.feather * 100f).roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
                     Slider(
                         value = selectedSubMask.radial.feather.coerceIn(0f, 1f),
                         onValueChange = { newValue ->
@@ -2505,7 +2969,7 @@ private fun TabbedEditorControls(
                         ) { Text("Set End") }
                     }
 
-                    Text("Range: ${(selectedSubMask.linear.range * 100f).roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
+                    Text("Softness: ${(selectedSubMask.linear.range * 100f).roundToInt()}%", color = MaterialTheme.colorScheme.onSurface)
                     Slider(
                         value = selectedSubMask.linear.range.coerceIn(0.01f, 1.5f),
                         onValueChange = { newValue ->
@@ -3420,7 +3884,11 @@ private fun ImagePreview(
     brushSize: Float = 60f,
     maskTapMode: MaskTapMode = MaskTapMode.None,
     onMaskTap: ((MaskPoint) -> Unit)? = null,
-    onBrushStrokeFinished: ((List<MaskPoint>, Float) -> Unit)? = null
+    onBrushStrokeFinished: ((List<MaskPoint>, Float) -> Unit)? = null,
+    onLassoFinished: ((List<MaskPoint>) -> Unit)? = null,
+    onSubMaskHandleDrag: ((MaskHandle, MaskPoint) -> Unit)? = null,
+    onSubMaskHandleDragStateChange: ((Boolean) -> Unit)? = null,
+    onRequestAiSubjectOverride: (() -> Unit)? = null
 ) {
     var scale by remember { mutableStateOf(1f) }
     var offsetX by remember { mutableStateOf(0f) }
@@ -3428,6 +3896,7 @@ private fun ImagePreview(
 
     val currentStroke = remember { mutableStateListOf<MaskPoint>() }
     val density = LocalDensity.current
+    val activeSubMaskState by rememberUpdatedState(activeSubMask)
 
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize(),
@@ -3485,7 +3954,7 @@ private fun ImagePreview(
                     if (!showMaskOverlay || maskOverlay == null || !maskOverlay.adjustments.isNeutralForMask()) {
                         null
                     } else {
-                        val maxDim = 768
+                        val maxDim = 512
                         val w = bitmap.width
                         val h = bitmap.height
                         val scale = if (w >= h) maxDim.toFloat() / w.coerceAtLeast(1) else maxDim.toFloat() / h.coerceAtLeast(1)
@@ -3523,6 +3992,23 @@ private fun ImagePreview(
                                 drawLine(color = strokeColor, start = start, end = end, strokeWidth = 2.dp.toPx())
                                 drawCircle(color = strokeColor, radius = handleRadius, center = start)
                                 drawCircle(color = strokeColor, radius = handleRadius, center = end)
+
+                                val dx = end.x - start.x
+                                val dy = end.y - start.y
+                                val len = kotlin.math.sqrt(dx * dx + dy * dy).coerceAtLeast(0.001f)
+                                val nx = -dy / len
+                                val ny = dx / len
+                                val half = run {
+                                    val base = minOf(bmpW, bmpH)
+                                    val rangePx = if (activeSubMask.linear.range <= 1.5f) activeSubMask.linear.range * base else activeSubMask.linear.range
+                                    rangePx * baseScale
+                                }
+                                val a1 = Offset(start.x + nx * half, start.y + ny * half)
+                                val a2 = Offset(end.x + nx * half, end.y + ny * half)
+                                val b1 = Offset(start.x - nx * half, start.y - ny * half)
+                                val b2 = Offset(end.x - nx * half, end.y - ny * half)
+                                drawLine(color = Color(0x88FFFFFF), start = a1, end = a2, strokeWidth = 1.dp.toPx())
+                                drawLine(color = Color(0x88FFFFFF), start = b1, end = b2, strokeWidth = 1.dp.toPx())
                             }
 
                             SubMaskType.Radial.id -> {
@@ -3534,9 +4020,96 @@ private fun ImagePreview(
                                 }
                                 drawCircle(color = strokeColor, radius = radiusPx, center = center, style = Stroke(width = 2.dp.toPx()))
                                 drawCircle(color = strokeColor, radius = handleRadius, center = center)
+
+                                val innerRadius = radiusPx * (1f - activeSubMask.radial.feather.coerceIn(0f, 1f))
+                                if (innerRadius > 0.5f) {
+                                    drawCircle(color = Color(0x88FFFFFF), radius = innerRadius, center = center, style = Stroke(width = 1.dp.toPx()))
+                                }
                             }
                         }
                     }
+                }
+
+                if (activeSubMask != null && onSubMaskHandleDrag != null && !isPainting) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(activeSubMask.id, bitmap) {
+                                var dragging: MaskHandle? = null
+                                detectDragGestures(
+                                    onDragStart = { start ->
+                                        val sub = activeSubMaskState ?: return@detectDragGestures
+                                        fun dist(a: Offset, b: Offset): Float {
+                                            val dx = a.x - b.x
+                                            val dy = a.y - b.y
+                                            return kotlin.math.sqrt(dx * dx + dy * dy)
+                                        }
+
+                                        val handlePx = with(density) { 24.dp.toPx() }
+
+                                        dragging = when (sub.type) {
+                                            SubMaskType.Radial.id -> {
+                                                val centerPx = run {
+                                                    val maxX = (bmpW - 1f).coerceAtLeast(1f)
+                                                    val maxY = (bmpH - 1f).coerceAtLeast(1f)
+                                                    val cx = sub.radial.centerX
+                                                    val cy = sub.radial.centerY
+                                                    val px = if (cx <= 1.5f) cx.coerceIn(0f, 1f) * maxX else cx.coerceIn(0f, maxX)
+                                                    val py = if (cy <= 1.5f) cy.coerceIn(0f, 1f) * maxY else cy.coerceIn(0f, maxY)
+                                                    Offset(left + px * baseScale, top + py * baseScale)
+                                                }
+                                                if (dist(start, centerPx) <= handlePx) MaskHandle.RadialCenter else null
+                                            }
+
+                                            SubMaskType.Linear.id -> {
+                                                val startPx = run {
+                                                    val maxX = (bmpW - 1f).coerceAtLeast(1f)
+                                                    val maxY = (bmpH - 1f).coerceAtLeast(1f)
+                                                    val sx = sub.linear.startX
+                                                    val sy = sub.linear.startY
+                                                    val px = if (sx <= 1.5f) sx.coerceIn(0f, 1f) * maxX else sx.coerceIn(0f, maxX)
+                                                    val py = if (sy <= 1.5f) sy.coerceIn(0f, 1f) * maxY else sy.coerceIn(0f, maxY)
+                                                    Offset(left + px * baseScale, top + py * baseScale)
+                                                }
+                                                val endPx = run {
+                                                    val maxX = (bmpW - 1f).coerceAtLeast(1f)
+                                                    val maxY = (bmpH - 1f).coerceAtLeast(1f)
+                                                    val ex = sub.linear.endX
+                                                    val ey = sub.linear.endY
+                                                    val px = if (ex <= 1.5f) ex.coerceIn(0f, 1f) * maxX else ex.coerceIn(0f, maxX)
+                                                    val py = if (ey <= 1.5f) ey.coerceIn(0f, 1f) * maxY else ey.coerceIn(0f, maxY)
+                                                    Offset(left + px * baseScale, top + py * baseScale)
+                                                }
+                                                when {
+                                                    dist(start, startPx) <= handlePx -> MaskHandle.LinearStart
+                                                    dist(start, endPx) <= handlePx -> MaskHandle.LinearEnd
+                                                    else -> null
+                                                }
+                                            }
+
+                                            else -> null
+                                        }
+
+                                        val active = dragging ?: return@detectDragGestures
+                                        onSubMaskHandleDragStateChange?.invoke(true)
+                                        onSubMaskHandleDrag(active, toImagePoint(start))
+                                    },
+                                    onDrag = { change, _ ->
+                                        val active = dragging ?: return@detectDragGestures
+                                        change.consume()
+                                        onSubMaskHandleDrag(active, toImagePoint(change.position))
+                                    },
+                                    onDragEnd = {
+                                        dragging = null
+                                        onSubMaskHandleDragStateChange?.invoke(false)
+                                    },
+                                    onDragCancel = {
+                                        dragging = null
+                                        onSubMaskHandleDragStateChange?.invoke(false)
+                                    }
+                                )
+                            }
+                    )
                 }
 
                 if (onMaskTap != null && maskTapMode != MaskTapMode.None && !isPainting) {
@@ -3553,8 +4126,10 @@ private fun ImagePreview(
 
                 if (currentStroke.isNotEmpty()) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        val brushSizePx = brushSize * baseScale
-                        val strokeWidth = brushSizePx.coerceAtLeast(1f)
+                        val strokeWidth = when (activeSubMask?.type) {
+                            SubMaskType.AiSubject.id -> 2.dp.toPx()
+                            else -> (brushSize * baseScale).coerceAtLeast(1f)
+                        }
                         val maxX = (bmpW - 1f).coerceAtLeast(1f)
                         val maxY = (bmpH - 1f).coerceAtLeast(1f)
                         fun toDisplayOffset(p: MaskPoint): Offset {
@@ -3579,43 +4154,90 @@ private fun ImagePreview(
                 }
             }
 
-            if (isMaskMode && isPainting && onBrushStrokeFinished != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(isPainting, brushSize, bitmap) {
-                            detectDragGestures(
-                                onDragStart = { start ->
-                                    currentStroke.clear()
-                                    currentStroke.add(toImagePoint(start))
-                                },
-                                onDrag = { change, _ ->
-                                    change.consume()
-                                    val newPoint = toImagePoint(change.position)
-                                    val last = currentStroke.lastOrNull()
-                                    val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
-                                    val minStep = (brushSizeNorm / 6f).coerceAtLeast(0.003f)
-                                    if (last == null) {
-                                        currentStroke.add(newPoint)
-                                    } else {
-                                        val dx = newPoint.x - last.x
-                                        val dy = newPoint.y - last.y
-                                        if (dx * dx + dy * dy >= minStep * minStep) {
-                                            currentStroke.add(newPoint)
+            if (isMaskMode && isPainting && activeSubMask != null) {
+                when (activeSubMask.type) {
+                    SubMaskType.Brush.id -> {
+                        val callback = onBrushStrokeFinished ?: return@BoxWithConstraints
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(isPainting, brushSize, bitmap) {
+                                    detectDragGestures(
+                                        onDragStart = { start ->
+                                            currentStroke.clear()
+                                            currentStroke.add(toImagePoint(start))
+                                        },
+                                        onDrag = { change, _ ->
+                                            change.consume()
+                                            val newPoint = toImagePoint(change.position)
+                                            val last = currentStroke.lastOrNull()
+                                            val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
+                                            val minStep = (brushSizeNorm / 6f).coerceAtLeast(0.003f)
+                                            if (last == null) {
+                                                currentStroke.add(newPoint)
+                                            } else {
+                                                val dx = newPoint.x - last.x
+                                                val dy = newPoint.y - last.y
+                                                if (dx * dx + dy * dy >= minStep * minStep) {
+                                                    currentStroke.add(newPoint)
+                                                }
+                                            }
+                                        },
+                                        onDragEnd = {
+                                            if (currentStroke.isNotEmpty()) {
+                                                val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
+                                                callback(currentStroke.toList(), brushSizeNorm)
+                                            }
+                                            currentStroke.clear()
+                                        },
+                                        onDragCancel = { currentStroke.clear() }
+                                    )
+                                }
+                        )
+                    }
+
+                    SubMaskType.AiSubject.id -> {
+                        val callback = onLassoFinished ?: return@BoxWithConstraints
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(isPainting, bitmap) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown()
+                                        val sub = activeSubMaskState ?: return@awaitEachGesture
+                                        if (sub.aiSubject.maskDataBase64 != null) {
+                                            onRequestAiSubjectOverride?.invoke()
+                                            currentStroke.clear()
+                                            while (true) {
+                                                val event = awaitPointerEvent()
+                                                event.changes.forEach { it.consume() }
+                                                if (event.changes.all { !it.pressed }) break
+                                            }
+                                            return@awaitEachGesture
                                         }
+
+                                        currentStroke.clear()
+                                        currentStroke.add(toImagePoint(down.position))
+                                        var lastPoint = currentStroke.last()
+                                        val minStep = 0.004f
+                                        drag(down.id) { change ->
+                                            change.consume()
+                                            val newPoint = toImagePoint(change.position)
+                                            val dx = newPoint.x - lastPoint.x
+                                            val dy = newPoint.y - lastPoint.y
+                                            if (dx * dx + dy * dy >= minStep * minStep) {
+                                                currentStroke.add(newPoint)
+                                                lastPoint = newPoint
+                                            }
+                                        }
+
+                                        if (currentStroke.size >= 3) callback(currentStroke.toList())
+                                        currentStroke.clear()
                                     }
-                                },
-                                onDragEnd = {
-                                    if (currentStroke.isNotEmpty()) {
-                                        val brushSizeNorm = (brushSize / baseDim).coerceAtLeast(0.0001f)
-                                        onBrushStrokeFinished(currentStroke.toList(), brushSizeNorm)
-                                    }
-                                    currentStroke.clear()
-                                },
-                                onDragCancel = { currentStroke.clear() }
-                            )
-                        }
-                )
+                                }
+                        )
+                    }
+                }
             }
         } else {
             Text(
