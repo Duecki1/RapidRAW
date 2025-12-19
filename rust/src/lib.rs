@@ -48,6 +48,10 @@ struct AdjustmentValues {
     dehaze: f32,
     structure: f32,
     centre: f32,
+    vignette_amount: f32,
+    vignette_midpoint: f32,
+    vignette_roundness: f32,
+    vignette_feather: f32,
     sharpness: f32,
     luma_noise_reduction: f32,
     color_noise_reduction: f32,
@@ -121,6 +125,10 @@ struct AdjustmentScales {
     dehaze: f32,
     structure: f32,
     centre: f32,
+    vignette_amount: f32,
+    vignette_midpoint: f32,
+    vignette_roundness: f32,
+    vignette_feather: f32,
     sharpness: f32,
     luma_noise_reduction: f32,
     color_noise_reduction: f32,
@@ -144,6 +152,10 @@ const ADJUSTMENT_SCALES: AdjustmentScales = AdjustmentScales {
     dehaze: 750.0,
     structure: 200.0,
     centre: 250.0,  // RapidRAW uses 250.0
+    vignette_amount: 100.0,
+    vignette_midpoint: 100.0,
+    vignette_roundness: 100.0,
+    vignette_feather: 100.0,
     sharpness: 80.0,
     luma_noise_reduction: 100.0,
     color_noise_reduction: 100.0,
@@ -177,6 +189,10 @@ impl AdjustmentValues {
             dehaze: scale(self.dehaze, scales.dehaze),
             structure: scale(self.structure, scales.structure),
             centre: scale(self.centre, scales.centre),
+            vignette_amount: scale(self.vignette_amount, scales.vignette_amount),
+            vignette_midpoint: scale(self.vignette_midpoint, scales.vignette_midpoint),
+            vignette_roundness: scale(self.vignette_roundness, scales.vignette_roundness),
+            vignette_feather: scale(self.vignette_feather, scales.vignette_feather),
             sharpness: scale(self.sharpness, scales.sharpness),
             luma_noise_reduction: scale(self.luma_noise_reduction, scales.luma_noise_reduction),
             color_noise_reduction: scale(self.color_noise_reduction, scales.color_noise_reduction),
@@ -205,6 +221,10 @@ impl AddAssign for AdjustmentValues {
         self.dehaze += rhs.dehaze;
         self.structure += rhs.structure;
         self.centre += rhs.centre;
+        self.vignette_amount += rhs.vignette_amount;
+        self.vignette_midpoint += rhs.vignette_midpoint;
+        self.vignette_roundness += rhs.vignette_roundness;
+        self.vignette_feather += rhs.vignette_feather;
         self.sharpness += rhs.sharpness;
         self.luma_noise_reduction += rhs.luma_noise_reduction;
         self.color_noise_reduction += rhs.color_noise_reduction;
@@ -525,6 +545,10 @@ struct AdjustmentsPayload {
     dehaze: f32,
     structure: f32,
     centre: f32,
+    vignette_amount: f32,
+    vignette_midpoint: f32,
+    vignette_roundness: f32,
+    vignette_feather: f32,
     sharpness: f32,
     luma_noise_reduction: f32,
     color_noise_reduction: f32,
@@ -557,6 +581,10 @@ impl AdjustmentsPayload {
             dehaze: self.dehaze,
             structure: self.structure,
             centre: self.centre,
+            vignette_amount: self.vignette_amount,
+            vignette_midpoint: self.vignette_midpoint,
+            vignette_roundness: self.vignette_roundness,
+            vignette_feather: self.vignette_feather,
             sharpness: self.sharpness,
             luma_noise_reduction: self.luma_noise_reduction,
             color_noise_reduction: self.color_noise_reduction,
@@ -1866,6 +1894,43 @@ fn render_linear_with_payload(
                     srgb[2] + (mask_curved[2] - srgb[2]) * influence,
                 ];
             }
+        }
+
+        if adjustment_values.vignette_amount.abs() > 0.00001 {
+            let v_amount = adjustment_values.vignette_amount.clamp(-1.0, 1.0);
+            let v_mid = adjustment_values.vignette_midpoint.clamp(0.0, 1.0);
+            let v_round = (1.0 - adjustment_values.vignette_roundness).clamp(0.01, 4.0);
+            let v_feather = adjustment_values.vignette_feather.clamp(0.0, 1.0) * 0.5;
+
+            let x = (idx as u32) % width;
+            let y = (idx as u32) / width;
+            let full_w = width as f32;
+            let full_h = height as f32;
+            let aspect = if full_w > 0.0 { full_h / full_w } else { 1.0 };
+
+            let uv_x = (x as f32 / full_w - 0.5) * 2.0;
+            let uv_y = (y as f32 / full_h - 0.5) * 2.0;
+
+            let sign_x = if uv_x > 0.0 { 1.0 } else if uv_x < 0.0 { -1.0 } else { 0.0 };
+            let sign_y = if uv_y > 0.0 { 1.0 } else if uv_y < 0.0 { -1.0 } else { 0.0 };
+
+            let uv_round_x = sign_x * uv_x.abs().powf(v_round);
+            let uv_round_y = sign_y * uv_y.abs().powf(v_round);
+            let d = ((uv_round_x * uv_round_x) + (uv_round_y * aspect) * (uv_round_y * aspect)).sqrt() * 0.5;
+
+            let vignette_mask = smoothstep(v_mid - v_feather, v_mid + v_feather, d);
+            if v_amount < 0.0 {
+                let mult = (1.0 + v_amount * vignette_mask).clamp(0.0, 2.0);
+                srgb = [srgb[0] * mult, srgb[1] * mult, srgb[2] * mult];
+            } else {
+                let t = (v_amount * vignette_mask).clamp(0.0, 1.0);
+                srgb = [
+                    srgb[0] + (1.0 - srgb[0]) * t,
+                    srgb[1] + (1.0 - srgb[1]) * t,
+                    srgb[2] + (1.0 - srgb[2]) * t,
+                ];
+            }
+            srgb = [srgb[0].clamp(0.0, 1.0), srgb[1].clamp(0.0, 1.0), srgb[2].clamp(0.0, 1.0)];
         }
 
         out[0] = clamp_to_u8(srgb[0] * 255.0);

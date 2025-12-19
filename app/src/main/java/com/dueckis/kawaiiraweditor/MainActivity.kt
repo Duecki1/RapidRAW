@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+
 package com.dueckis.kawaiiraweditor
 
 import android.content.ContentValues
@@ -63,6 +65,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
@@ -71,13 +74,14 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ContainedLoadingIndicator
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -168,6 +172,10 @@ private enum class AdjustmentField {
     Dehaze,
     Structure,
     Centre,
+    VignetteAmount,
+    VignetteMidpoint,
+    VignetteRoundness,
+    VignetteFeather,
     Sharpness,
     LumaNoiseReduction,
     ColorNoiseReduction,
@@ -284,6 +292,10 @@ private data class AdjustmentState(
     val dehaze: Float = 0f,
     val structure: Float = 0f,
     val centre: Float = 0f,
+    val vignetteAmount: Float = 0f,
+    val vignetteMidpoint: Float = 50f,
+    val vignetteRoundness: Float = 0f,
+    val vignetteFeather: Float = 50f,
     val sharpness: Float = 0f,
     val lumaNoiseReduction: Float = 0f,
     val colorNoiseReduction: Float = 0f,
@@ -309,6 +321,10 @@ private data class AdjustmentState(
             put("dehaze", dehaze)
             put("structure", structure)
             put("centre", centre)
+            put("vignetteAmount", vignetteAmount)
+            put("vignetteMidpoint", vignetteMidpoint)
+            put("vignetteRoundness", vignetteRoundness)
+            put("vignetteFeather", vignetteFeather)
             put("sharpness", sharpness)
             put("lumaNoiseReduction", lumaNoiseReduction)
             put("colorNoiseReduction", colorNoiseReduction)
@@ -338,6 +354,10 @@ private data class AdjustmentState(
             AdjustmentField.Dehaze -> dehaze
             AdjustmentField.Structure -> structure
             AdjustmentField.Centre -> centre
+            AdjustmentField.VignetteAmount -> vignetteAmount
+            AdjustmentField.VignetteMidpoint -> vignetteMidpoint
+            AdjustmentField.VignetteRoundness -> vignetteRoundness
+            AdjustmentField.VignetteFeather -> vignetteFeather
             AdjustmentField.Sharpness -> sharpness
             AdjustmentField.LumaNoiseReduction -> lumaNoiseReduction
             AdjustmentField.ColorNoiseReduction -> colorNoiseReduction
@@ -363,6 +383,10 @@ private data class AdjustmentState(
             AdjustmentField.Dehaze -> copy(dehaze = value)
             AdjustmentField.Structure -> copy(structure = value)
             AdjustmentField.Centre -> copy(centre = value)
+            AdjustmentField.VignetteAmount -> copy(vignetteAmount = value)
+            AdjustmentField.VignetteMidpoint -> copy(vignetteMidpoint = value)
+            AdjustmentField.VignetteRoundness -> copy(vignetteRoundness = value)
+            AdjustmentField.VignetteFeather -> copy(vignetteFeather = value)
             AdjustmentField.Sharpness -> copy(sharpness = value)
             AdjustmentField.LumaNoiseReduction -> copy(lumaNoiseReduction = value)
             AdjustmentField.ColorNoiseReduction -> copy(colorNoiseReduction = value)
@@ -392,6 +416,13 @@ private data class AdjustmentState(
 private enum class SubMaskMode {
     Additive,
     Subtractive,
+}
+
+private fun SubMaskMode.inverted(): SubMaskMode {
+    return when (this) {
+        SubMaskMode.Additive -> SubMaskMode.Subtractive
+        SubMaskMode.Subtractive -> SubMaskMode.Additive
+    }
 }
 
 private enum class SubMaskType(val id: String) {
@@ -444,11 +475,13 @@ private data class AiSubjectMaskParametersState(
 private enum class EditorPanelTab {
     Adjustments,
     Color,
+    Effects,
     Masks,
 }
 
 private fun AdjustmentState.isNeutralForMask(): Boolean {
     fun nearZero(v: Float) = kotlin.math.abs(v) <= 0.000001f
+    fun near(v: Float, target: Float) = kotlin.math.abs(v - target) <= 0.000001f
     return nearZero(brightness) &&
         nearZero(contrast) &&
         nearZero(highlights) &&
@@ -463,6 +496,10 @@ private fun AdjustmentState.isNeutralForMask(): Boolean {
         nearZero(dehaze) &&
         nearZero(structure) &&
         nearZero(centre) &&
+        nearZero(vignetteAmount) &&
+        near(vignetteMidpoint, 50f) &&
+        nearZero(vignetteRoundness) &&
+        near(vignetteFeather, 50f) &&
         nearZero(sharpness) &&
         nearZero(lumaNoiseReduction) &&
         nearZero(colorNoiseReduction) &&
@@ -920,6 +957,13 @@ private val detailsSection = listOf(
     AdjustmentControl(field = AdjustmentField.ChromaticAberrationBlueYellow, label = "CA Blue/Yellow", range = -100f..100f, step = 1f)
 )
 
+private val vignetteSection = listOf(
+    AdjustmentControl(field = AdjustmentField.VignetteAmount, label = "Amount", range = -100f..100f, step = 1f, defaultValue = 0f),
+    AdjustmentControl(field = AdjustmentField.VignetteMidpoint, label = "Midpoint", range = 0f..100f, step = 1f, defaultValue = 50f),
+    AdjustmentControl(field = AdjustmentField.VignetteRoundness, label = "Roundness", range = -100f..100f, step = 1f, defaultValue = 0f),
+    AdjustmentControl(field = AdjustmentField.VignetteFeather, label = "Feather", range = 0f..100f, step = 1f, defaultValue = 50f)
+)
+
 private val adjustmentSections = listOf(
     "Basic" to basicSection,
     "Color" to colorSection,
@@ -1336,6 +1380,10 @@ private fun EditorScreen(
                     dehaze = json.optDouble("dehaze", 0.0).toFloat(),
                     structure = json.optDouble("structure", 0.0).toFloat(),
                     centre = json.optDouble("centre", 0.0).toFloat(),
+                    vignetteAmount = json.optDouble("vignetteAmount", 0.0).toFloat(),
+                    vignetteMidpoint = json.optDouble("vignetteMidpoint", 50.0).toFloat(),
+                    vignetteRoundness = json.optDouble("vignetteRoundness", 0.0).toFloat(),
+                    vignetteFeather = json.optDouble("vignetteFeather", 50.0).toFloat(),
                     sharpness = json.optDouble("sharpness", 0.0).toFloat(),
                     lumaNoiseReduction = json.optDouble("lumaNoiseReduction", 0.0).toFloat(),
                     colorNoiseReduction = json.optDouble("colorNoiseReduction", 0.0).toFloat(),
@@ -1369,6 +1417,10 @@ private fun EditorScreen(
                         dehaze = maskAdjustmentsObj.optDouble("dehaze", 0.0).toFloat(),
                         structure = maskAdjustmentsObj.optDouble("structure", 0.0).toFloat(),
                         centre = maskAdjustmentsObj.optDouble("centre", 0.0).toFloat(),
+                        vignetteAmount = maskAdjustmentsObj.optDouble("vignetteAmount", 0.0).toFloat(),
+                        vignetteMidpoint = maskAdjustmentsObj.optDouble("vignetteMidpoint", 50.0).toFloat(),
+                        vignetteRoundness = maskAdjustmentsObj.optDouble("vignetteRoundness", 0.0).toFloat(),
+                        vignetteFeather = maskAdjustmentsObj.optDouble("vignetteFeather", 50.0).toFloat(),
                         sharpness = maskAdjustmentsObj.optDouble("sharpness", 0.0).toFloat(),
                         lumaNoiseReduction = maskAdjustmentsObj.optDouble("lumaNoiseReduction", 0.0).toFloat(),
                         colorNoiseReduction = maskAdjustmentsObj.optDouble("colorNoiseReduction", 0.0).toFloat(),
@@ -2153,7 +2205,10 @@ private fun EditorScreen(
             text = {
                 if (metadataJson == null) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        LoadingIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = MaterialTheme.colorScheme.primary
+                        )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text("Reading metadata...")
                     }
@@ -2256,10 +2311,9 @@ private fun ExportButton(
         enabled = sessionHandle != 0L && !isExporting
     ) {
         if (isExporting) {
-            CircularProgressIndicator(
+            LoadingIndicator(
                 modifier = Modifier
                     .size(18.dp),
-                strokeWidth = 2.dp,
                 color = MaterialTheme.colorScheme.onPrimary
             )
             Spacer(modifier = Modifier.width(6.dp))
@@ -2296,7 +2350,7 @@ private fun TabbedEditorControls(
     maskTapMode: MaskTapMode,
     onMaskTapModeChange: (MaskTapMode) -> Unit
 ) {
-    val tabs = listOf(EditorPanelTab.Adjustments, EditorPanelTab.Color, EditorPanelTab.Masks)
+    val tabs = listOf(EditorPanelTab.Adjustments, EditorPanelTab.Color, EditorPanelTab.Effects, EditorPanelTab.Masks)
     val maskTabsByMaskId = remember { mutableStateMapOf<String, Int>() }
     TabRow(selectedTabIndex = tabs.indexOf(panelTab).coerceAtLeast(0)) {
         Tab(
@@ -2316,6 +2370,15 @@ private fun TabbedEditorControls(
                 onPanelTabChange(EditorPanelTab.Color)
             },
             text = { Text("Color") }
+        )
+        Tab(
+            selected = panelTab == EditorPanelTab.Effects,
+            onClick = {
+                onPaintingMaskChange(false)
+                onMaskTapModeChange(MaskTapMode.None)
+                onPanelTabChange(EditorPanelTab.Effects)
+            },
+            text = { Text("Effects") }
         )
         Tab(
             selected = panelTab == EditorPanelTab.Masks,
@@ -2382,6 +2445,30 @@ private fun TabbedEditorControls(
             }
         }
 
+        EditorPanelTab.Effects -> {
+            PanelSectionCard(
+                title = "Vignette",
+                subtitle = "Post-crop vignette"
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    vignetteSection.forEach { control ->
+                        val currentValue = adjustments.valueFor(control.field)
+                        AdjustmentSlider(
+                            label = control.label,
+                            value = currentValue,
+                            range = control.range,
+                            step = control.step,
+                            defaultValue = control.defaultValue,
+                            formatter = control.formatter,
+                            onValueChange = { snapped ->
+                                onAdjustmentsChange(adjustments.withValue(control.field, snapped))
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
         EditorPanelTab.Masks -> {
             val selectedMask = masks.firstOrNull { it.id == selectedMaskId }
             val selectedSubMask = selectedMask?.subMasks?.firstOrNull { it.id == selectedSubMaskId }
@@ -2393,6 +2480,18 @@ private fun TabbedEditorControls(
                     SubMaskType.Radial -> SubMaskState(id = id, type = type.id, mode = mode, radial = RadialMaskParametersState())
                     SubMaskType.AiSubject -> SubMaskState(id = id, type = type.id, mode = mode, aiSubject = AiSubjectMaskParametersState())
                 }
+            }
+
+            fun duplicateMaskState(mask: MaskState, invertDuplicate: Boolean): MaskState {
+                val newId = java.util.UUID.randomUUID().toString()
+                fun copySubMask(sub: SubMaskState): SubMaskState = sub.copy(id = java.util.UUID.randomUUID().toString())
+                val newName = if (mask.name.endsWith(" Copy")) "${mask.name} 2" else "${mask.name} Copy"
+                return mask.copy(
+                    id = newId,
+                    name = newName,
+                    invert = if (invertDuplicate) !mask.invert else mask.invert,
+                    subMasks = mask.subMasks.map(::copySubMask)
+                )
             }
 
             var showAddMaskMenu by remember { mutableStateOf(false) }
@@ -2451,6 +2550,7 @@ private fun TabbedEditorControls(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 masks.forEachIndexed { index, mask ->
                     val isSelected = mask.id == selectedMaskId
+                    var showMaskMenu by remember(mask.id) { mutableStateOf(false) }
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(
@@ -2518,6 +2618,45 @@ private fun TabbedEditorControls(
                                     imageVector = Icons.Filled.KeyboardArrowDown,
                                     contentDescription = "Move mask down"
                                 )
+                            }
+                            Box {
+                                IconButton(onClick = { showMaskMenu = true }) {
+                                    Icon(
+                                        imageVector = Icons.Filled.MoreVert,
+                                        contentDescription = "Mask options"
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = showMaskMenu,
+                                    onDismissRequest = { showMaskMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Duplicate") },
+                                        onClick = {
+                                            showMaskMenu = false
+                                            val duplicated = duplicateMaskState(mask, invertDuplicate = false)
+                                            val updated = masks.toMutableList().apply { add(index + 1, duplicated) }.toList()
+                                            onMasksChange(updated)
+                                            onPaintingMaskChange(false)
+                                            onShowMaskOverlayChange(duplicated.adjustments.isNeutralForMask())
+                                            onSelectedMaskIdChange(duplicated.id)
+                                            onSelectedSubMaskIdChange(duplicated.subMasks.firstOrNull()?.id)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Duplicate and invert") },
+                                        onClick = {
+                                            showMaskMenu = false
+                                            val duplicated = duplicateMaskState(mask, invertDuplicate = true)
+                                            val updated = masks.toMutableList().apply { add(index + 1, duplicated) }.toList()
+                                            onMasksChange(updated)
+                                            onPaintingMaskChange(false)
+                                            onShowMaskOverlayChange(duplicated.adjustments.isNeutralForMask())
+                                            onSelectedMaskIdChange(duplicated.id)
+                                            onSelectedSubMaskIdChange(duplicated.subMasks.firstOrNull()?.id)
+                                        }
+                                    )
+                                }
                             }
                             IconButton(
                                 onClick = {
@@ -2662,6 +2801,7 @@ private fun TabbedEditorControls(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 selectedMask.subMasks.forEach { sub ->
                     val isSelected = sub.id == selectedSubMaskId
+                    var showSubMaskMenu by remember(sub.id) { mutableStateOf(false) }
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(
@@ -2712,6 +2852,100 @@ private fun TabbedEditorControls(
                                 color = MaterialTheme.colorScheme.onSurface,
                                 fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                             )
+                            Box {
+                                IconButton(onClick = { showSubMaskMenu = true }) {
+                                    Icon(
+                                        imageVector = Icons.Filled.MoreVert,
+                                        contentDescription = "Submask options"
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = showSubMaskMenu,
+                                    onDismissRequest = { showSubMaskMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Set to Add") },
+                                        onClick = {
+                                            showSubMaskMenu = false
+                                            val updated = masks.map { m ->
+                                                if (m.id != selectedMask.id) m
+                                                else m.copy(subMasks = m.subMasks.map { s ->
+                                                    if (s.id != sub.id) s else s.copy(mode = SubMaskMode.Additive)
+                                                })
+                                            }
+                                            onMasksChange(updated)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Set to Subtract") },
+                                        onClick = {
+                                            showSubMaskMenu = false
+                                            val updated = masks.map { m ->
+                                                if (m.id != selectedMask.id) m
+                                                else m.copy(subMasks = m.subMasks.map { s ->
+                                                    if (s.id != sub.id) s else s.copy(mode = SubMaskMode.Subtractive)
+                                                })
+                                            }
+                                            onMasksChange(updated)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Invert (toggle add/subtract)") },
+                                        onClick = {
+                                            showSubMaskMenu = false
+                                            val updated = masks.map { m ->
+                                                if (m.id != selectedMask.id) m
+                                                else m.copy(subMasks = m.subMasks.map { s ->
+                                                    if (s.id != sub.id) s else s.copy(mode = s.mode.inverted())
+                                                })
+                                            }
+                                            onMasksChange(updated)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Duplicate") },
+                                        onClick = {
+                                            showSubMaskMenu = false
+                                            val newId = java.util.UUID.randomUUID().toString()
+                                            val copy = sub.copy(id = newId)
+                                            val updated = masks.map { m ->
+                                                if (m.id != selectedMask.id) m
+                                                else {
+                                                    val out = m.subMasks.toMutableList()
+                                                    val idx = out.indexOfFirst { it.id == sub.id }.coerceAtLeast(0)
+                                                    out.add(idx + 1, copy)
+                                                    m.copy(subMasks = out.toList())
+                                                }
+                                            }
+                                            onMasksChange(updated)
+                                            onMaskTapModeChange(MaskTapMode.None)
+                                            onSelectedSubMaskIdChange(newId)
+                                            onPaintingMaskChange(copy.type == SubMaskType.Brush.id || copy.type == SubMaskType.AiSubject.id)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Duplicate and invert") },
+                                        onClick = {
+                                            showSubMaskMenu = false
+                                            val newId = java.util.UUID.randomUUID().toString()
+                                            val copy = sub.copy(id = newId, mode = sub.mode.inverted())
+                                            val updated = masks.map { m ->
+                                                if (m.id != selectedMask.id) m
+                                                else {
+                                                    val out = m.subMasks.toMutableList()
+                                                    val idx = out.indexOfFirst { it.id == sub.id }.coerceAtLeast(0)
+                                                    out.add(idx + 1, copy)
+                                                    m.copy(subMasks = out.toList())
+                                                }
+                                            }
+                                            onMasksChange(updated)
+                                            onMaskTapModeChange(MaskTapMode.None)
+                                            onSelectedSubMaskIdChange(newId)
+                                            onPaintingMaskChange(copy.type == SubMaskType.Brush.id || copy.type == SubMaskType.AiSubject.id)
+                                        }
+                                    )
+                                }
+                            }
                             IconButton(
                                 onClick = {
                                     val updated = masks.map { m ->
@@ -4415,7 +4649,7 @@ private fun ImagePreview(
         }
 
         if (isLoading) {
-            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            ContainedLoadingIndicator(modifier = Modifier.align(Alignment.Center))
         }
     }
 }
