@@ -1,4 +1,7 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class
+)
 
 package com.dueckis.kawaiiraweditor
 
@@ -12,6 +15,7 @@ import android.graphics.PorterDuffXfermode
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Base64
@@ -25,6 +29,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -46,6 +51,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
@@ -66,6 +72,10 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
@@ -77,13 +87,19 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.LinearWavyProgressIndicator
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.HorizontalFloatingToolbar
+import androidx.compose.material3.FloatingToolbarDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -91,6 +107,11 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -112,6 +133,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Path
@@ -126,11 +148,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.zIndex
 import com.dueckis.kawaiiraweditor.ui.theme.KawaiiRawEditorTheme
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
@@ -142,6 +166,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.Executors
+import kotlin.math.exp
 import kotlin.math.roundToInt
 import kotlin.ranges.ClosedFloatingPointRange
 
@@ -1017,20 +1042,21 @@ private fun RapidRawEditorScreen() {
     when (currentScreen) {
         Screen.Gallery -> GalleryScreen(
             items = galleryItems,
-            onItemClick = { item ->
+            onOpenItem = { item ->
                 selectedItem = item
                 currentScreen = Screen.Editor
             },
             onAddClick = { newItem ->
                 galleryItems = galleryItems + newItem
             },
-            onRatingChange = { projectId, rating ->
+            onRatingChangeMany = { projectIds, rating ->
                 coroutineScope.launch {
+                    val ids = projectIds.toSet()
                     withContext(Dispatchers.IO) {
-                        storage.setRating(projectId, rating)
+                        ids.forEach { id -> storage.setRating(id, rating) }
                     }
                     galleryItems = galleryItems.map { item ->
-                        if (item.projectId != projectId) item else item.copy(rating = rating.coerceIn(0, 5))
+                        if (item.projectId !in ids) item else item.copy(rating = rating.coerceIn(0, 5))
                     }
                 }
             }
@@ -1048,9 +1074,9 @@ private fun RapidRawEditorScreen() {
 @Composable
 private fun GalleryScreen(
     items: List<GalleryItem>,
-    onItemClick: (GalleryItem) -> Unit,
+    onOpenItem: (GalleryItem) -> Unit,
     onAddClick: (GalleryItem) -> Unit,
-    onRatingChange: (String, Int) -> Unit
+    onRatingChangeMany: (List<String>, Int) -> Unit
 ) {
     val context = LocalContext.current
     val storage = remember { ProjectStorage(context) }
@@ -1089,71 +1115,300 @@ private fun GalleryScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
-        Column(
-            modifier = Modifier.fillMaxSize()
-        ) {
-            // Header
-            Text(
-                text = "Gallery",
-                style = MaterialTheme.typography.headlineLarge,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
-                color = MaterialTheme.colorScheme.onSurface
-            )
+    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var isBulkExporting by remember { mutableStateOf(false) }
+    var bulkExportDone by remember { mutableIntStateOf(0) }
+    var bulkExportTotal by remember { mutableIntStateOf(0) }
+    var bulkExportStatus by remember { mutableStateOf<String?>(null) }
+    val bulkExportProgressAnim = remember { Animatable(0f) }
+    val selectedItems = remember(items, selectedIds) { items.filter { it.projectId in selectedIds } }
+    val uniformRating = remember(selectedItems) {
+        selectedItems.map { it.rating }.distinct().singleOrNull()
+    }
 
-            if (items.isEmpty()) {
-                // Empty state
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        text = "No RAW files yet",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Tap the + button to add RAW files",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
+    fun startBulkExport(projectIds: List<String>) {
+        if (isBulkExporting) return
+        if (projectIds.isEmpty()) return
+
+        isBulkExporting = true
+        bulkExportDone = 0
+        bulkExportTotal = projectIds.size
+
+        coroutineScope.launch {
+            var successCount = 0
+            var failureCount = 0
+            bulkExportProgressAnim.snapTo(0f)
+
+            for ((idx, projectId) in projectIds.withIndex()) {
+                val total = bulkExportTotal.coerceAtLeast(1)
+                val start = idx.toFloat() / total.toFloat()
+                val end = (idx + 1).toFloat() / total.toFloat()
+                val slot = (end - start).coerceAtLeast(0f)
+
+                if (bulkExportProgressAnim.value < start - 0.0001f) {
+                    bulkExportProgressAnim.animateTo(
+                        start,
+                        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
                     )
                 }
-            } else {
-                // Grid of items
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(columns),
-                    contentPadding = PaddingValues(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+
+                val cap = (start + slot * 0.985f).coerceIn(0f, 1f)
+                val fakeJob = launch {
+                    val t0 = SystemClock.uptimeMillis()
+                    while (isActive) {
+                        val tSec = (SystemClock.uptimeMillis() - t0).toFloat() / 1000f
+                        val frac = 1f - exp(-tSec / 1.4f)
+                        val target = (start + (cap - start) * frac).coerceIn(start, cap)
+                        val current = bulkExportProgressAnim.value
+                        val next = current + (target - current) * 0.22f
+                        bulkExportProgressAnim.snapTo(next.coerceIn(start, cap))
+                        delay(16)
+                    }
+                }
+
+                val (rawBytes, adjustmentsJson) = withContext(Dispatchers.IO) {
+                    val raw = storage.loadRawBytes(projectId)
+                    val adj = storage.loadAdjustments(projectId)
+                    raw to adj
+                }
+                if (rawBytes == null) {
+                    failureCount++
+                    fakeJob.cancel()
+                    fakeJob.join()
+                    bulkExportDone = idx + 1
+                    bulkExportProgressAnim.animateTo(
+                        end,
+                        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
+                    )
+                    continue
+                }
+
+                val jpegBytes = withContext(Dispatchers.Default) {
+                    runCatching { LibRawDecoder.decodeFullRes(rawBytes, adjustmentsJson) }.getOrNull()
+                }
+                if (jpegBytes == null) {
+                    failureCount++
+                    fakeJob.cancel()
+                    fakeJob.join()
+                    bulkExportDone = idx + 1
+                    bulkExportProgressAnim.animateTo(
+                        end,
+                        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
+                    )
+                    continue
+                }
+
+                val saved = withContext(Dispatchers.IO) { saveJpegToPictures(context, jpegBytes) }
+                if (saved == null) failureCount++ else successCount++
+
+                fakeJob.cancel()
+                fakeJob.join()
+                bulkExportDone = idx + 1
+                bulkExportProgressAnim.animateTo(
+                    end,
+                    animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
+                )
+            }
+
+            isBulkExporting = false
+            bulkExportStatus =
+                if (failureCount == 0) "Exported $successCount JPEG(s)."
+                else "Exported $successCount JPEG(s), $failureCount failed."
+        }
+    }
+
+    LaunchedEffect(bulkExportStatus) {
+        if (bulkExportStatus == null) return@LaunchedEffect
+        delay(2500)
+        bulkExportStatus = null
+    }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars),
+        topBar = {
+            Column {
+                CenterAlignedTopAppBar(title = { Text("Gallery") })
+                if (isBulkExporting) {
+                    LinearWavyProgressIndicator(
+                        progress = { bulkExportProgressAnim.value.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        },
+        floatingActionButton = {
+            if (selectedIds.isEmpty() && !isBulkExporting) {
+                FloatingActionButton(
+                    onClick = { pickRaw.launch(mimeTypes) },
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 ) {
-                    items(items.size) { index ->
-                        GalleryItemCard(
-                            item = items[index],
-                            onClick = { onItemClick(items[index]) },
-                            onRatingChange = { rating ->
-                                onRatingChange(items[index].projectId, rating)
+                    Icon(Icons.Default.Add, contentDescription = "Add RAW file")
+                }
+            }
+        }
+    ) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            val gridBottomPadding = if (selectedIds.isNotEmpty()) 112.dp else 16.dp
+
+            Column(modifier = Modifier.fillMaxSize()) {
+                bulkExportStatus?.let { msg ->
+                    Text(
+                        text = msg,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)
+                    )
+                }
+
+                if (items.isEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = "No RAW files yet",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Tap the + button to add RAW files",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        modifier = Modifier
+                            .fillMaxSize(),
+                        columns = GridCells.Fixed(columns),
+                        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = gridBottomPadding),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(items.size) { index ->
+                            val item = items[index]
+                            val isSelected = item.projectId in selectedIds
+                            GalleryItemCard(
+                                item = item,
+                                selected = isSelected,
+                                onClick = {
+                                    if (isBulkExporting) return@GalleryItemCard
+                                    if (selectedIds.isEmpty()) {
+                                        onOpenItem(item)
+                                    } else {
+                                        selectedIds =
+                                            if (isSelected) selectedIds - item.projectId else selectedIds + item.projectId
+                                    }
+                                },
+                                onLongClick = {
+                                    if (isBulkExporting) return@GalleryItemCard
+                                    selectedIds =
+                                        if (isSelected) selectedIds - item.projectId else selectedIds + item.projectId
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (selectedIds.isNotEmpty()) {
+                HorizontalFloatingToolbar(
+                    expanded = true,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 24.dp) // Floating distance from screen bottom
+                        .padding(horizontal = 16.dp) // Horizontal safety
+                        .zIndex(1f),
+
+                    // Use specific 'toolbar' prefix for colors in Expressive defaults
+                    colors = FloatingToolbarDefaults.standardFloatingToolbarColors(
+                        toolbarContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        toolbarContentColor = MaterialTheme.colorScheme.onSurface
+                    ),
+
+                    // The Primary Action (Export) lives in the FAB slot
+                    floatingActionButton = {
+                        FloatingToolbarDefaults.StandardFloatingActionButton(
+                            onClick = {
+                                if (!isBulkExporting) {
+                                    startBulkExport(selectedIds.toList())
+                                }
+                            },
+                            // Manually handle disabled visual state since 'enabled' param doesn't exist
+                            containerColor = if (isBulkExporting)
+                                MaterialTheme.colorScheme.surfaceContainerHighest
+                            else
+                                MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = if (isBulkExporting)
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                            else
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                        ) {
+                            Icon(Icons.Filled.Download, contentDescription = "Export Selection")
+                        }
+                    }
+                ) {
+                    // --- Toolbar Content ---
+
+                    // 1. Navigation: Exit Selection Mode (Leading)
+                    IconButton(
+                        onClick = { selectedIds = emptySet() }
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                    }
+
+                    // 2. Context: Selection Count
+                    Text(
+                        text = "${selectedIds.size} selected",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+
+                    // Optional Divider to separate Context from Secondary Actions
+                    VerticalDivider(
+                        modifier = Modifier
+                            .height(16.dp)
+                            .padding(horizontal = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+
+                    // 3. Secondary Action: Rating
+                    IconButton(
+                        enabled = !isBulkExporting,
+                        onClick = {
+                            val next = when (uniformRating) {
+                                null -> 1
+                                5 -> 0
+                                else -> (uniformRating + 1).coerceIn(0, 5)
                             }
+                            onRatingChangeMany(selectedIds.toList(), next)
+                        },
+                        colors = IconButtonDefaults.iconButtonColors(
+                            contentColor = if ((uniformRating ?: 0) > 0)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    ) {
+                        Icon(
+                            imageVector = if ((uniformRating ?: 0) > 0) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = "Cycle rating"
                         )
                     }
                 }
             }
-        }
-
-        // FAB
-        FloatingActionButton(
-            onClick = { pickRaw.launch(mimeTypes) },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp),
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-        ) {
-            Icon(Icons.Default.Add, contentDescription = "Add RAW file")
         }
     }
 }
@@ -1161,12 +1416,17 @@ private fun GalleryScreen(
 @Composable
 private fun GalleryItemCard(
     item: GalleryItem,
+    selected: Boolean,
     onClick: () -> Unit,
-    onRatingChange: (Int) -> Unit
+    onLongClick: () -> Unit
 ) {
     Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
         shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
@@ -1199,6 +1459,22 @@ private fun GalleryItemCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                if (selected) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.25f))
+                    )
+                    Icon(
+                        imageVector = Icons.Filled.CheckCircle,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .size(24.dp)
+                    )
+                }
             }
             
             Text(
@@ -1208,29 +1484,6 @@ private fun GalleryItemCard(
                 maxLines = 2,
                 color = MaterialTheme.colorScheme.onSurface
             )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.Start,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                for (i in 1..5) {
-                    val filled = i <= item.rating
-                    IconButton(
-                        onClick = { onRatingChange(if (item.rating == i) 0 else i) },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (filled) Icons.Default.Star else Icons.Default.StarBorder,
-                            contentDescription = "Set rating to $i",
-                            tint = if (filled) Color(0xFFFFC107) else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-            }
         }
     }
 }
