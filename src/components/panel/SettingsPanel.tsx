@@ -18,10 +18,12 @@ import {
   Image as ImageIcon,
   Mouse,
   Touchpad,
+  FolderOpen,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { open as openPathDialog } from '@tauri-apps/plugin-dialog';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { Show, SignIn, useUser, useAuth, useClerk } from '@clerk/react';
@@ -535,6 +537,7 @@ export default function SettingsPanel({
     rawHighlightCompression: appSettings?.rawHighlightCompression ?? 2.5,
     processingBackend: appSettings?.processingBackend || 'auto',
     linuxGpuOptimization: appSettings?.linuxGpuOptimization ?? false,
+    linuxOnnxruntimePath: appSettings?.linuxOnnxruntimePath || '',
     highResZoomMultiplier: appSettings?.highResZoomMultiplier || 1.0,
     useFullDpiRendering: appSettings?.useFullDpiRendering ?? false,
     useWgpuRenderer:
@@ -643,6 +646,7 @@ export default function SettingsPanel({
       rawHighlightCompression: appSettings?.rawHighlightCompression ?? 2.5,
       processingBackend: appSettings?.processingBackend || 'auto',
       linuxGpuOptimization: appSettings?.linuxGpuOptimization ?? false,
+      linuxOnnxruntimePath: appSettings?.linuxOnnxruntimePath || '',
       highResZoomMultiplier: appSettings?.highResZoomMultiplier || 1.0,
       useFullDpiRendering: appSettings?.useFullDpiRendering ?? false,
       useWgpuRenderer: appSettings?.useWgpuRenderer ?? true,
@@ -680,6 +684,7 @@ export default function SettingsPanel({
     if (
       key === 'processingBackend' ||
       key === 'linuxGpuOptimization' ||
+      key === 'linuxOnnxruntimePath' ||
       key === 'useWgpuRenderer' ||
       key === 'thumbnailWorkerThreads'
     ) {
@@ -904,6 +909,26 @@ export default function SettingsPanel({
       console.error('AI Connector connection test failed:', err);
     } finally {
       setTimeout(() => setTestStatus({ testing: false, message: '', success: null }), EXECUTE_TIMEOUT);
+    }
+  };
+
+  const handleSelectLinuxOnnxruntimePath = async () => {
+    try {
+      const selected = await openPathDialog({
+        multiple: false,
+        directory: false,
+        title: t('settings.processing.ai.onnxruntime.selectDialogTitle'),
+        filters: [
+          { name: 'ONNX Runtime', extensions: ['so'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+
+      if (typeof selected === 'string') {
+        handleProcessingSettingChange('linuxOnnxruntimePath', selected);
+      }
+    } catch (err) {
+      console.error('Failed to select ONNX Runtime library:', err);
     }
   };
 
@@ -2101,6 +2126,52 @@ export default function SettingsPanel({
                             <li>{t('settings.processing.ai.cpu.feature2')}</li>
                             <li>{t('settings.processing.ai.cpu.feature3')}</li>
                           </Text>
+
+                          {osPlatform === 'linux' && (
+                            <div className="mt-8 pt-6 border-t border-border-color">
+                              <SettingItem
+                                label={t('settings.processing.ai.onnxruntime.linuxPath')}
+                                description={t('settings.processing.ai.onnxruntime.linuxPathDesc')}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <div className="flex-1 min-w-0 h-10 px-3 py-2 rounded-md border border-border-color bg-bg-primary text-sm text-text-primary flex items-center">
+                                    <span
+                                      className={clsx('truncate', {
+                                        'text-text-secondary italic': !processingSettings.linuxOnnxruntimePath,
+                                      })}
+                                    >
+                                      {processingSettings.linuxOnnxruntimePath ||
+                                        t('settings.processing.ai.onnxruntime.bundledRuntime')}
+                                    </span>
+                                  </div>
+                                  <Button className="shrink-0" onClick={handleSelectLinuxOnnxruntimePath}>
+                                    <FolderOpen size={16} />
+                                    {t('settings.processing.ai.onnxruntime.select')}
+                                  </Button>
+                                  {processingSettings.linuxOnnxruntimePath && (
+                                    <button
+                                      onClick={() => handleProcessingSettingChange('linuxOnnxruntimePath', '')}
+                                      className="p-2 text-text-secondary hover:text-red-400 hover:bg-bg-primary rounded-md transition-colors"
+                                      data-tooltip={t('settings.processing.ai.onnxruntime.clear')}
+                                    >
+                                      <X size={18} />
+                                    </button>
+                                  )}
+                                </div>
+                                {restartRequired && (
+                                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 p-3 bg-blue-900/10 border border-blue-500/50 rounded-lg">
+                                    <Text as="span" color={TextColors.info} className="flex items-center gap-2">
+                                      <Info size={18} />
+                                      {t('settings.processing.ai.onnxruntime.restartHint')}
+                                    </Text>
+                                    <Button onClick={handleSaveAndRelaunch} className="shrink-0">
+                                      {t('settings.processing.saveRelaunch')}
+                                    </Button>
+                                  </div>
+                                )}
+                              </SettingItem>
+                            </div>
+                          )}
                         </motion.div>
                       )}
 

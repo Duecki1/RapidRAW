@@ -7,6 +7,15 @@ use anyhow::{Result, anyhow};
 use image::imageops::{self, FilterType};
 use image::{DynamicImage, GenericImageView, GrayImage, Rgb, Rgb32FImage, Rgba, RgbaImage};
 use ndarray::{Array, Array4, IxDyn};
+#[cfg(target_os = "windows")]
+use ort::execution_providers::DirectMLExecutionProvider;
+#[cfg(target_os = "macos")]
+use ort::execution_providers::coreml::{CoreMLComputeUnits, CoreMLExecutionProvider};
+#[cfg(target_os = "linux")]
+use ort::execution_providers::{
+    CUDAExecutionProvider, ROCmExecutionProvider, cuda::CuDNNConvAlgorithmSearch,
+};
+use ort::execution_providers::{ExecutionProvider, ExecutionProviderDispatch};
 use ort::session::Session;
 use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
@@ -79,6 +88,88 @@ pub struct AiState {
     pub lama_model: Option<Arc<Mutex<Session>>>,
     pub embeddings: Option<ImageEmbeddings>,
     pub depth_map: Option<CachedDepthMap>,
+}
+
+fn push_execution_provider<P>(providers: &mut Vec<ExecutionProviderDispatch>, provider: P)
+where
+    P: ExecutionProvider + Into<ExecutionProviderDispatch> + 'static,
+{
+    let name = provider.name();
+    if !provider.supported_by_platform() {
+        return;
+    }
+
+    match provider.is_available() {
+        Ok(true) => {
+            log::info!("ONNX Runtime provider available for AI masks: {}", name);
+            let dispatch: ExecutionProviderDispatch = provider.into();
+            providers.push(dispatch.fail_silently());
+        }
+        Ok(false) => {
+            log::info!("ONNX Runtime provider not available for AI masks: {}", name);
+        }
+        Err(error) => {
+            log::warn!(
+                "Could not query ONNX Runtime provider {} for AI masks: {}",
+                name,
+                error
+            );
+        }
+    }
+}
+
+fn mask_execution_providers() -> Vec<ExecutionProviderDispatch> {
+    let mut providers = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        push_execution_provider(
+            &mut providers,
+            DirectMLExecutionProvider::default().with_device_id(0),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        push_execution_provider(
+            &mut providers,
+            CoreMLExecutionProvider::default().with_compute_units(CoreMLComputeUnits::CPUAndGPU),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        push_execution_provider(
+            &mut providers,
+            CUDAExecutionProvider::default()
+                .with_device_id(0)
+                .with_conv_algorithm_search(CuDNNConvAlgorithmSearch::Heuristic)
+                .with_tf32(true),
+        );
+        push_execution_provider(
+            &mut providers,
+            ROCmExecutionProvider::default().with_device_id(0),
+        );
+    }
+
+    providers
+}
+
+fn create_mask_session(
+    model_path: PathBuf,
+    execution_providers: &[ExecutionProviderDispatch],
+) -> Result<Session> {
+    let mut builder = Session::builder()?;
+
+    if !execution_providers.is_empty() {
+        #[cfg(target_os = "windows")]
+        {
+            builder = builder.with_memory_pattern(false)?;
+        }
+        builder = builder.with_execution_providers(execution_providers)?;
+    }
+
+    Ok(builder.commit_from_file(model_path)?)
 }
 
 fn edt_1d(f: &mut [f32], v: &mut [usize], z: &mut [f32], d: &mut [f32]) {
@@ -275,9 +366,14 @@ pub async fn get_or_init_ai_models(
     let sky_seg_path = models_dir.join(SKYSEG_FILENAME);
     let depth_path = models_dir.join(DEPTH_FILENAME);
 
-    let birefnet = Session::builder()?.commit_from_file(birefnet_path)?;
-    let sky_seg = Session::builder()?.commit_from_file(sky_seg_path)?;
-    let depth_anything = Session::builder()?.commit_from_file(depth_path)?;
+    let execution_providers = mask_execution_providers();
+    if execution_providers.is_empty() {
+        log::info!("No GPU ONNX Runtime provider available for AI masks; using CPU execution.");
+    }
+
+    let birefnet = create_mask_session(birefnet_path, &execution_providers)?;
+    let sky_seg = create_mask_session(sky_seg_path, &execution_providers)?;
+    let depth_anything = create_mask_session(depth_path, &execution_providers)?;
 
     crate::register_exit_handler();
 

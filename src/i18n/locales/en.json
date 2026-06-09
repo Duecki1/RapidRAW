@@ -1521,17 +1521,26 @@
           "title": "Self-Hosted (RapidRAW AI Connector)"
         },
         "cpu": {
-          "description": "Integrated directly into RapidRAW, these features run entirely on your computer. They are fast, free, and require no setup, making them ideal for everyday workflow acceleration.",
-          "feature1": "AI Masking (Subject, Sky, Foreground)",
+          "description": "Integrated directly into RapidRAW, these features run entirely on your computer. They use GPU acceleration when a GPU-enabled ONNX Runtime is available, and fall back to CPU otherwise.",
+          "feature1": "AI Masking (Subject, Sky, Foreground, Depth)",
           "feature2": "Automatic Image Tagging",
           "feature3": "Simple CPU-based Generative Replace",
-          "title": "Built-in AI (CPU)"
+          "title": "Built-in AI (Local)"
         },
         "description": "RapidRAW's AI is built for flexibility. Choose your ideal workflow, from fast local tools to powerful self-hosting.",
+        "onnxruntime": {
+          "bundledRuntime": "Bundled ONNX Runtime",
+          "clear": "Use bundled runtime",
+          "linuxPath": "Linux ONNX Runtime Library",
+          "linuxPathDesc": "Select a GPU-enabled ONNX Runtime library, usually libonnxruntime.so from an extracted Linux runtime package. The selected runtime is used after relaunch.",
+          "restartHint": "Relaunch RapidRAW to use the selected ONNX Runtime library.",
+          "select": "Select",
+          "selectDialogTitle": "Select ONNX Runtime Library"
+        },
         "providers": {
           "aiConnector": "AI Connector",
           "cloud": "Cloud",
-          "cpu": "CPU"
+          "cpu": "Local"
         },
         "title": "Generative AI"
       },

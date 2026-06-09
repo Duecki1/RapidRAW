@@ -359,6 +359,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub linux_gpu_optimization: Option<bool>,
     #[serde(default)]
+    pub linux_onnxruntime_path: Option<String>,
+    #[serde(default)]
     pub library_view_mode: Option<String>,
     #[serde(default = "default_export_presets")]
     pub export_presets: Vec<ExportPreset>,
@@ -457,6 +459,7 @@ impl Default for AppSettings {
             linux_gpu_optimization: Some(true),
             #[cfg(not(target_os = "linux"))]
             linux_gpu_optimization: Some(false),
+            linux_onnxruntime_path: None,
             library_view_mode: Some("flat".to_string()),
             export_presets: default_export_presets(),
             my_lenses: Some(Vec::new()),

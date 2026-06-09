@@ -179,6 +179,7 @@ export interface AppSettings {
   rawHighlightCompression?: number;
   processingBackend?: string;
   linuxGpuOptimization?: boolean;
+  linuxOnnxruntimePath?: string;
   exportPresets?: ExportPreset[];
   myLenses?: any;
   enableFolderImageCounts?: boolean;

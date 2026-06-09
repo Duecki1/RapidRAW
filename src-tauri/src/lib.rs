@@ -113,6 +113,75 @@ pub fn register_exit_handler() {
 #[cfg(not(target_os = "macos"))]
 pub fn register_exit_handler() {}
 
+#[cfg(not(target_os = "android"))]
+fn onnxruntime_library_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "onnxruntime.dll"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "libonnxruntime.so"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "libonnxruntime.dylib"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        "libonnxruntime.so"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_linux_onnxruntime_path(resource_path: &Path, settings: &AppSettings) -> PathBuf {
+    let bundled_path = resource_path.join(onnxruntime_library_name());
+
+    let Some(custom_path) = settings
+        .linux_onnxruntime_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+    else {
+        return bundled_path;
+    };
+
+    if custom_path.is_file() {
+        return custom_path;
+    }
+
+    if custom_path.is_dir() {
+        for candidate in [
+            custom_path.join(onnxruntime_library_name()),
+            custom_path.join("lib").join(onnxruntime_library_name()),
+        ] {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    println!(
+        "Configured Linux ONNX Runtime path was not usable: {}. Falling back to bundled runtime.",
+        custom_path.display()
+    );
+    bundled_path
+}
+
+#[cfg(not(target_os = "android"))]
+fn resolve_onnxruntime_path(resource_path: &Path, settings: &AppSettings) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        resolve_linux_onnxruntime_path(resource_path, settings)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = settings;
+        resource_path.join(onnxruntime_library_name())
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CommunityPreset {
     pub name: String,
@@ -1996,17 +2065,7 @@ pub fn run() {
                         .resolve("resources", tauri::path::BaseDirectory::Resource)
                         .expect("failed to resolve resource directory");
 
-                    let ort_library_name = {
-                        #[cfg(target_os = "windows")]
-                        { "onnxruntime.dll" }
-                        #[cfg(target_os = "linux")]
-                        { "libonnxruntime.so" }
-                        #[cfg(target_os = "macos")]
-                        { "libonnxruntime.dylib" }
-                        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-                        { "libonnxruntime.so" }
-                    };
-                    let ort_library_path = resource_path.join(ort_library_name);
+                    let ort_library_path = resolve_onnxruntime_path(&resource_path, &settings);
                     std::env::set_var("ORT_DYLIB_PATH", &ort_library_path);
                     println!("Set ORT_DYLIB_PATH to: {}", ort_library_path.display());
                 }
