@@ -68,10 +68,16 @@ pub struct ImageEmbeddings {
 #[derive(Clone)]
 pub struct CachedDepthMap {
     pub path_hash: String,
-    pub depth_image: GrayImage,
-    pub original_size: (u32, u32),
+    pub mask_data_base64: String,
 }
 
+#[derive(Clone)]
+pub struct CachedAiMask {
+    pub path_hash: String,
+    pub mask_data_base64: String,
+}
+
+#[derive(Default)]
 pub struct AiState {
     pub models: Option<Arc<AiModels>>,
     pub denoise_model: Option<Arc<Mutex<Session>>>,
@@ -79,6 +85,8 @@ pub struct AiState {
     pub lama_model: Option<Arc<Mutex<Session>>>,
     pub embeddings: Option<ImageEmbeddings>,
     pub depth_map: Option<CachedDepthMap>,
+    pub foreground_mask: Option<CachedAiMask>,
+    pub sky_mask: Option<CachedAiMask>,
 }
 
 fn edt_1d(f: &mut [f32], v: &mut [usize], z: &mut [f32], d: &mut [f32]) {
@@ -293,11 +301,7 @@ pub async fn get_or_init_ai_models(
     } else {
         *ai_state_lock = Some(AiState {
             models: Some(models.clone()),
-            denoise_model: None,
-            clip_models: None,
-            lama_model: None,
-            embeddings: None,
-            depth_map: None,
+            ..Default::default()
         });
     }
 
@@ -352,12 +356,8 @@ pub async fn get_or_init_denoise_model(
         state.denoise_model = Some(denoise_model.clone());
     } else {
         *ai_state_lock = Some(AiState {
-            models: None,
             denoise_model: Some(denoise_model.clone()),
-            clip_models: None,
-            lama_model: None,
-            embeddings: None,
-            depth_map: None,
+            ..Default::default()
         });
     }
 
@@ -423,12 +423,8 @@ pub async fn get_or_init_clip_models(
         state.clip_models = Some(clip_models.clone());
     } else {
         *ai_state_lock = Some(AiState {
-            models: None,
-            denoise_model: None,
             clip_models: Some(clip_models.clone()),
-            lama_model: None,
-            embeddings: None,
-            depth_map: None,
+            ..Default::default()
         });
     }
 
@@ -483,12 +479,8 @@ pub async fn get_or_init_lama_model(
         state.lama_model = Some(lama_model.clone());
     } else {
         *ai_state_lock = Some(AiState {
-            models: None,
-            denoise_model: None,
-            clip_models: None,
             lama_model: Some(lama_model.clone()),
-            embeddings: None,
-            depth_map: None,
+            ..Default::default()
         });
     }
 
