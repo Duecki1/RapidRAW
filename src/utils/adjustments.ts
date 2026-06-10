@@ -1,6 +1,7 @@
 import { Crop } from 'react-image-crop';
 import { v4 as uuidv4 } from 'uuid';
 import { SubMask, SubMaskMode } from '../components/panel/right/Masks';
+import { isAiMaskType, withMaskUpdatedFlag } from './maskUtils';
 
 export enum ActiveChannel {
   Blue = 'blue',
@@ -594,13 +595,24 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
   }
 
   const normalizeSubMasks = (subMasks: any[]) => {
-    return (subMasks || []).map((subMask: Partial<SubMask>) => ({
-      visible: true,
-      mode: SubMaskMode.Additive,
-      invert: false,
-      opacity: 100,
-      ...subMask,
-    }));
+    return (subMasks || []).map((subMask: Partial<SubMask>) => {
+      const normalizedSubMask = {
+        visible: true,
+        mode: SubMaskMode.Additive,
+        invert: false,
+        opacity: 100,
+        ...subMask,
+      };
+
+      if (isAiMaskType(normalizedSubMask.type)) {
+        normalizedSubMask.parameters = withMaskUpdatedFlag(
+          normalizedSubMask.parameters || {},
+          normalizedSubMask.parameters?.maskUpdated ?? true,
+        );
+      }
+
+      return normalizedSubMask;
+    });
   };
 
   const normalizedMasks = (loadedAdjustments.masks || []).map((maskContainer: MaskContainer) => {
