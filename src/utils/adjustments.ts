@@ -1,6 +1,6 @@
 import { Crop } from 'react-image-crop';
 import { v4 as uuidv4 } from 'uuid';
-import { SubMask, SubMaskMode } from '../components/panel/right/Masks';
+import { Mask, SubMask, SubMaskMode } from '../components/panel/right/Masks';
 import { isAiMaskType, withMaskUpdatedFlag } from './maskUtils';
 
 export enum ActiveChannel {
@@ -161,6 +161,7 @@ export interface Adjustments {
   colorGrading: ColorGradingProps;
   colorNoiseReduction: number;
   contrast: number;
+  customMaskComponents: Array<CustomMaskComponent>;
   curves: Curves;
   pointCurves?: Curves;
   parametricCurve?: ParametricCurve;
@@ -178,6 +179,7 @@ export interface Adjustments {
   halationAmount: number;
   highlights: number;
   hsl: Hsl;
+  hue: number;
   lensCorrectionMode: 'auto' | 'manual';
   lensDistortionAmount: number;
   lensVignetteAmount: number;
@@ -242,6 +244,12 @@ export interface AiPatch {
   prompt: string;
   subMasks: Array<SubMask>;
   visible: boolean;
+}
+
+export interface CustomMaskComponent {
+  id: string;
+  name: string;
+  subMasks: Array<SubMask>;
 }
 
 export interface Color {
@@ -309,6 +317,7 @@ export interface MaskAdjustments {
   halationAmount: number;
   highlights: number;
   hsl: Hsl;
+  hue: number;
   id?: string;
   lumaNoiseReduction: number;
   saturation: number;
@@ -445,6 +454,7 @@ export const INITIAL_MASK_ADJUSTMENTS: MaskAdjustments = {
     reds: { hue: 0, saturation: 0, luminance: 0 },
     yellows: { hue: 0, saturation: 0, luminance: 0 },
   },
+  hue: 0,
   lumaNoiseReduction: 0,
   saturation: 0,
   sectionVisibility: {
@@ -486,6 +496,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   colorGrading: { ...INITIAL_COLOR_GRADING },
   colorNoiseReduction: 0,
   contrast: 0,
+  customMaskComponents: [],
   crop: null,
   curves: getDefaultCurves(),
   pointCurves: getDefaultCurves(),
@@ -512,6 +523,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
     reds: { hue: 0, saturation: 0, luminance: 0 },
     yellows: { hue: 0, saturation: 0, luminance: 0 },
   },
+  hue: 0,
   lensCorrectionMode: 'manual',
   lensDistortionAmount: 100,
   lensVignetteAmount: 100,
@@ -594,26 +606,33 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
     return INITIAL_ADJUSTMENTS;
   }
 
-  const normalizeSubMasks = (subMasks: any[]) => {
+  const normalizeSubMasks = (subMasks: any[]): Array<SubMask> => {
     return (subMasks || []).map((subMask: Partial<SubMask>) => {
-      const normalizedSubMask = {
+      const normalized = {
         visible: true,
         mode: SubMaskMode.Additive,
         invert: false,
         opacity: 100,
         ...subMask,
-      };
+      } as SubMask;
 
-      if (isAiMaskType(normalizedSubMask.type)) {
-        normalizedSubMask.parameters = withMaskUpdatedFlag(
-          normalizedSubMask.parameters || {},
-          normalizedSubMask.parameters?.maskUpdated ?? true,
-        );
+      if (normalized.type === Mask.CustomComponent && Array.isArray(normalized.parameters?.subMasks)) {
+        normalized.parameters = {
+          ...normalized.parameters,
+          subMasks: normalizeSubMasks(normalized.parameters.subMasks),
+        };
       }
 
-      return normalizedSubMask;
+      return normalized;
     });
   };
+
+  const normalizeCustomMaskComponents = (components: any[]): Array<CustomMaskComponent> =>
+    (components || []).map((component: Partial<CustomMaskComponent>) => ({
+      id: component.id || uuidv4(),
+      name: component.name?.trim() || 'Custom Component',
+      subMasks: normalizeSubMasks(component.subMasks || []),
+    }));
 
   const normalizedMasks = (loadedAdjustments.masks || []).map((maskContainer: MaskContainer) => {
     const containerAdjustments = maskContainer.adjustments || {};
@@ -629,6 +648,7 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
         flareAmount: containerAdjustments.flareAmount ?? INITIAL_MASK_ADJUSTMENTS.flareAmount,
         glowAmount: containerAdjustments.glowAmount ?? INITIAL_MASK_ADJUSTMENTS.glowAmount,
         halationAmount: containerAdjustments.halationAmount ?? INITIAL_MASK_ADJUSTMENTS.halationAmount,
+        hue: containerAdjustments.hue ?? INITIAL_MASK_ADJUSTMENTS.hue,
         colorGrading: { ...INITIAL_MASK_ADJUSTMENTS.colorGrading, ...(containerAdjustments.colorGrading || {}) },
         hsl: { ...INITIAL_MASK_ADJUSTMENTS.hsl, ...(containerAdjustments.hsl || {}) },
         curves: containerAdjustments.curves ? deepCloneCurves(containerAdjustments.curves) : getDefaultCurves(),
@@ -690,6 +710,7 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
     curveMode: loadedAdjustments.curveMode || INITIAL_ADJUSTMENTS.curveMode,
     masks: normalizedMasks,
     aiPatches: normalizedAiPatches,
+    customMaskComponents: normalizeCustomMaskComponents(loadedAdjustments.customMaskComponents),
     sectionVisibility: {
       ...INITIAL_ADJUSTMENTS.sectionVisibility,
       ...(loadedAdjustments.sectionVisibility || {}),
@@ -831,6 +852,7 @@ export const ADJUSTMENT_SECTIONS: Sections = {
     ColorAdjustment.Hsl,
     ColorAdjustment.ColorGrading,
     'colorCalibration',
+    ColorAdjustment.Hue,
   ],
   details: [
     DetailsAdjustment.Clarity,
