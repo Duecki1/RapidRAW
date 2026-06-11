@@ -27,6 +27,7 @@ import {
   ChartArea,
   Circle,
   ClipboardPaste,
+  Component,
   Copy,
   Eye,
   EyeOff,
@@ -71,6 +72,7 @@ import {
   Adjustments,
   INITIAL_MASK_ADJUSTMENTS,
   INITIAL_MASK_CONTAINER,
+  CustomMaskComponent,
   MaskContainer,
   ADJUSTMENT_SECTIONS,
 } from '../../../utils/adjustments';
@@ -109,6 +111,7 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 35 },
     ],
   },
+  [Mask.CustomComponent]: { parameters: [] },
   [Mask.Luminance]: {
     parameters: [
       { key: 'tolerance', min: 1, max: 100, step: 1, defaultValue: 20 },
@@ -140,6 +143,97 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
   },
   [Mask.QuickEraser]: { parameters: [] },
 };
+
+const cloneSubMaskData = (subMask: SubMask, options: { invert?: boolean; rename?: boolean } = {}): SubMask => {
+  const clonedSubMask = JSON.parse(JSON.stringify(subMask));
+
+  clonedSubMask.id = uuidv4();
+  clonedSubMask.invert = options.invert ? !clonedSubMask.invert : clonedSubMask.invert;
+  clonedSubMask.name = options.rename === false ? clonedSubMask.name : `${getSubMaskName(subMask)} Copy`;
+
+  if (Array.isArray(clonedSubMask.parameters?.subMasks)) {
+    clonedSubMask.parameters = {
+      ...clonedSubMask.parameters,
+      subMasks: clonedSubMask.parameters.subMasks.map((nestedSubMask: SubMask) =>
+        cloneSubMaskData(nestedSubMask, { rename: false }),
+      ),
+    };
+  }
+
+  return clonedSubMask;
+};
+
+const cloneSubMaskTree = (subMasks: Array<SubMask>): Array<SubMask> =>
+  (subMasks || []).map((subMask) => cloneSubMaskData(subMask, { rename: false }));
+
+const cloneSubMaskTreeForCustomComponent = (subMasks: Array<SubMask>, customComponentId: string): Array<SubMask> =>
+  (subMasks || []).flatMap((subMask) => {
+    if (subMask.type === Mask.CustomComponent && subMask.parameters?.customComponentId === customComponentId) {
+      return cloneSubMaskTreeForCustomComponent(subMask.parameters?.subMasks || [], customComponentId);
+    }
+
+    const clonedSubMask = cloneSubMaskData(subMask, { rename: false });
+    if (Array.isArray(clonedSubMask.parameters?.subMasks)) {
+      clonedSubMask.parameters = {
+        ...clonedSubMask.parameters,
+        subMasks: cloneSubMaskTreeForCustomComponent(clonedSubMask.parameters.subMasks, customComponentId),
+      };
+    }
+
+    return [clonedSubMask];
+  });
+
+const syncComponentInstancesDeep = (
+  subMasks: Array<SubMask>,
+  targetComponentId: string,
+  updatedData: Partial<CustomMaskComponent>,
+): Array<SubMask> =>
+  subMasks.map((subMask) => {
+    let updatedSubMask = subMask;
+
+    if (
+      updatedSubMask.type === Mask.CustomComponent &&
+      updatedSubMask.parameters?.customComponentId === targetComponentId
+    ) {
+      updatedSubMask = {
+        ...updatedSubMask,
+        name: updatedData.name ?? updatedSubMask.name,
+        parameters: {
+          ...updatedSubMask.parameters,
+          ...(updatedData.subMasks ? { subMasks: cloneSubMaskTree(updatedData.subMasks) } : {}),
+        },
+      };
+    }
+
+    if (Array.isArray(updatedSubMask.parameters?.subMasks)) {
+      updatedSubMask = {
+        ...updatedSubMask,
+        parameters: {
+          ...updatedSubMask.parameters,
+          subMasks: syncComponentInstancesDeep(updatedSubMask.parameters.subMasks, targetComponentId, updatedData),
+        },
+      };
+    }
+
+    return updatedSubMask;
+  });
+
+const createCustomComponentSubMask = (
+  component: CustomMaskComponent,
+  mode: SubMaskMode = SubMaskMode.Additive,
+): SubMask => ({
+  id: uuidv4(),
+  visible: true,
+  invert: false,
+  opacity: 100,
+  mode,
+  name: component.name,
+  type: Mask.CustomComponent,
+  parameters: {
+    customComponentId: component.id,
+    subMasks: cloneSubMaskTree(component.subMasks),
+  },
+});
 
 const BrushTools = ({
   settings,
@@ -661,8 +755,23 @@ export default function MasksPanel() {
 
   const activeContainer = adjustments.masks?.find((m) => m.id === activeMaskContainerId);
   const activeSubMaskData = activeContainer?.subMasks?.find((sm) => sm.id === activeMaskId);
+  const customMaskComponents = adjustments.customMaskComponents || [];
   const isAiMask =
     activeSubMaskData && [Mask.AiSubject, Mask.AiForeground, Mask.AiSky, Mask.AiDepth].includes(activeSubMaskData.type);
+
+  const getNextCustomComponentName = () => {
+    const normalizedBase = 'Custom Component';
+    const usedNames = new Set(customMaskComponents.map((component) => component.name.toLowerCase()));
+    let suffix = 1;
+    let candidate = `${normalizedBase} ${suffix}`;
+
+    while (usedNames.has(candidate.toLowerCase())) {
+      suffix += 1;
+      candidate = `${normalizedBase} ${suffix}`;
+    }
+
+    return candidate;
+  };
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -746,12 +855,12 @@ export default function MasksPanel() {
 
   const handleResetAllMasks = () => {
     handleDeselect();
-    setAdjustments((prev: any) => ({ ...prev, masks: [] }));
+    setAdjustments((prev: any) => ({ ...prev, masks: [], customMaskComponents: [] }));
   };
 
-  const createMaskLogic = (type: Mask, mode: SubMaskMode = SubMaskMode.Additive) => {
-    if (!selectedImage) return createSubMask(type, {} as any, mode);
-    const subMask = createSubMask(type, selectedImage, mode);
+  const createMaskLogic = (type: Mask, mode: SubMaskMode = SubMaskMode.Additive): SubMask => {
+    if (!selectedImage) return createSubMask(type, {} as any, mode) as SubMask;
+    const subMask = createSubMask(type, selectedImage, mode) as SubMask;
 
     const steps = adjustments?.orientationSteps || 0;
     const isRotated = steps === 1 || steps === 3;
@@ -843,6 +952,48 @@ export default function MasksPanel() {
     else if (type === Mask.AiDepth) handleGenerateAiDepthMask(subMask.id, subMask.parameters);
   };
 
+  const handleAddCustomComponent = (
+    component: CustomMaskComponent,
+    targetContainerId?: string | null,
+    mode: SubMaskMode = SubMaskMode.Additive,
+    insertIndex: number = -1,
+  ) => {
+    const subMask = createCustomComponentSubMask(component, mode);
+
+    if (targetContainerId) {
+      setAdjustments((prev: Adjustments) => ({
+        ...prev,
+        masks: prev.masks?.map((container: MaskContainer) => {
+          if (container.id !== targetContainerId) return container;
+
+          const newSubMasks = [...container.subMasks];
+          if (insertIndex >= 0) {
+            newSubMasks.splice(insertIndex, 0, subMask);
+          } else {
+            newSubMasks.push(subMask);
+          }
+
+          return { ...container, subMasks: newSubMasks };
+        }),
+      }));
+      onSelectContainer(targetContainerId);
+      onSelectMask(subMask.id);
+      setExpandedContainers((prev) => new Set(prev).add(targetContainerId));
+      return;
+    }
+
+    const newContainer = {
+      ...INITIAL_MASK_CONTAINER,
+      id: uuidv4(),
+      name: `Mask ${(adjustments.masks?.length || 0) + 1}`,
+      subMasks: [subMask],
+    };
+    setAdjustments((prev: Adjustments) => ({ ...prev, masks: [...(prev.masks || []), newContainer] }));
+    onSelectContainer(newContainer.id);
+    onSelectMask(subMask.id);
+    setExpandedContainers((prev) => new Set(prev).add(newContainer.id));
+  };
+
   const handleGridClick = (type: Mask, forceNewMaskContainer: boolean = false) => {
     if (!forceNewMaskContainer && activeMaskContainerId) handleAddSubMask(activeMaskContainerId, type);
     else handleAddMaskContainer(type);
@@ -856,14 +1007,28 @@ export default function MasksPanel() {
     handleGridClick(type, true);
   };
 
+  const buildCustomComponentSubmenu = (targetContainerId?: string | null, mode: SubMaskMode = SubMaskMode.Additive) => {
+    if (!customMaskComponents.length) return null;
+
+    return {
+      label: 'Custom',
+      icon: Component,
+      submenu: customMaskComponents.map((component) => ({
+        label: component.name,
+        icon: Component,
+        onClick: () => handleAddCustomComponent(component, targetContainerId, mode),
+      })),
+    };
+  };
+
   const handleAddOthersMask = (event: React.MouseEvent) => {
     event.stopPropagation();
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const options = OTHERS_MASK_TYPES.map((maskType) => ({
       label: getMaskTypeName(maskType),
       icon: maskType.icon,
-      onClick: () => handleGridClick(maskType.type),
-      onRightClick: () => handleGridClick(maskType.type, true),
+      onClick: () => handleGridClick(maskType.type!),
+      onRightClick: () => handleGridClick(maskType.type!, true),
     }));
     showContextMenu(rect.left, rect.bottom + 5, options);
   };
@@ -880,9 +1045,9 @@ export default function MasksPanel() {
         disabled: maskType.disabled,
         onClick: () => {
           if (targetContainerId) {
-            handleAddSubMask(targetContainerId, maskType.type, mode);
+            handleAddSubMask(targetContainerId, maskType.type!, mode);
           } else {
-            handleAddMaskContainer(maskType.type);
+            handleAddMaskContainer(maskType.type!);
           }
         },
       }));
@@ -890,10 +1055,8 @@ export default function MasksPanel() {
     const container = targetContainerId ? adjustments.masks?.find((m) => m.id === targetContainerId) : null;
     const hasComponents = container && container.subMasks.length > 0;
 
-    const buildModeSubmenu = (label: string, icon: any, mode: SubMaskMode) => ({
-      label,
-      icon,
-      submenu: MASK_PANEL_CREATION_TYPES.map((maskType) => {
+    const buildModeSubmenu = (label: string, icon: any, mode: SubMaskMode) => {
+      const submenu: any[] = MASK_PANEL_CREATION_TYPES.map((maskType) => {
         if (maskType.id === 'others') {
           return {
             label: getMaskTypeName(maskType),
@@ -905,10 +1068,21 @@ export default function MasksPanel() {
           label: getMaskTypeName(maskType),
           icon: maskType.icon,
           disabled: maskType.disabled,
-          onClick: () => handleAddSubMask(targetContainerId!, maskType.type, mode),
+          onClick: () => handleAddSubMask(targetContainerId!, maskType.type!, mode),
         };
-      }),
-    });
+      });
+
+      const customComponentSubmenu = buildCustomComponentSubmenu(targetContainerId, mode);
+      if (customComponentSubmenu) {
+        submenu.push(customComponentSubmenu);
+      }
+
+      return {
+        label,
+        icon,
+        submenu,
+      };
+    };
 
     const options: any[] = buildMenu(
       MASK_PANEL_CREATION_TYPES.filter((m) => m.id !== 'others'),
@@ -921,6 +1095,10 @@ export default function MasksPanel() {
         icon: others.icon,
         submenu: buildMenu(OTHERS_MASK_TYPES, SubMaskMode.Additive),
       });
+    }
+    const customComponentSubmenu = buildCustomComponentSubmenu(targetContainerId, SubMaskMode.Additive);
+    if (customComponentSubmenu) {
+      options.push(customComponentSubmenu);
     }
 
     if (targetContainerId && hasComponents) {
@@ -940,13 +1118,57 @@ export default function MasksPanel() {
       masks: prev.masks.map((m) => (m.id === id ? { ...m, ...data } : m)),
     }));
   const updateSubMask = (id: string, data: any) =>
-    setAdjustments((prev: Adjustments) => ({
-      ...prev,
-      masks: prev.masks.map((m) => ({
+    setAdjustments((prev: Adjustments) => {
+      const renamedCustomComponentName = typeof data.name === 'string' ? data.name.trim() : '';
+      let renamedCustomComponentId: string | null = null;
+
+      const masks = prev.masks.map((m) => ({
         ...m,
-        subMasks: m.subMasks.map((sm) => (sm.id === id ? { ...sm, ...data } : sm)),
-      })),
-    }));
+        subMasks: m.subMasks.map((sm) => {
+          if (sm.id !== id) return sm;
+
+          if (
+            renamedCustomComponentName &&
+            sm.type === Mask.CustomComponent &&
+            typeof sm.parameters?.customComponentId === 'string'
+          ) {
+            renamedCustomComponentId = sm.parameters.customComponentId;
+          }
+
+          return { ...sm, ...data };
+        }),
+      }));
+
+      if (!renamedCustomComponentId || !renamedCustomComponentName) {
+        return { ...prev, masks };
+      }
+
+      return {
+        ...prev,
+        customMaskComponents: (prev.customMaskComponents || []).map((component) =>
+          component.id === renamedCustomComponentId
+            ? {
+                ...component,
+                name: renamedCustomComponentName,
+                subMasks: syncComponentInstancesDeep(component.subMasks, renamedCustomComponentId, {
+                  name: renamedCustomComponentName,
+                }),
+              }
+            : {
+                ...component,
+                subMasks: syncComponentInstancesDeep(component.subMasks, renamedCustomComponentId, {
+                  name: renamedCustomComponentName,
+                }),
+              },
+        ),
+        masks: masks.map((m) => ({
+          ...m,
+          subMasks: syncComponentInstancesDeep(m.subMasks, renamedCustomComponentId, {
+            name: renamedCustomComponentName,
+          }),
+        })),
+      };
+    });
 
   const handleDeleteContainer = (id: string) => {
     if (activeMaskContainerId === id) handleDeselect();
@@ -1106,6 +1328,72 @@ export default function MasksPanel() {
     insertSubMaskIntoContainer(containerId, pastedSubMask, insertIndex);
   };
 
+  const handleConvertContainerToNewComponent = (container: MaskContainer) => {
+    if (!container.subMasks.length) {
+      return;
+    }
+
+    const name = getNextCustomComponentName();
+    const customComponent: CustomMaskComponent = {
+      id: uuidv4(),
+      name,
+      subMasks: cloneSubMaskTree(container.subMasks),
+    };
+    const mergedSubMask = createCustomComponentSubMask(customComponent);
+
+    setAdjustments((prev: Adjustments) => ({
+      ...prev,
+      customMaskComponents: [...(prev.customMaskComponents || []), customComponent],
+      masks: prev.masks.map((maskContainer) =>
+        maskContainer.id === container.id ? { ...maskContainer, subMasks: [mergedSubMask] } : maskContainer,
+      ),
+    }));
+
+    onSelectContainer(container.id);
+    onSelectMask(mergedSubMask.id);
+    setRenamingId(mergedSubMask.id);
+    setTempName(name);
+    setExpandedContainers((prev) => new Set(prev).add(container.id));
+  };
+
+  const handleConvertContainerToExistingComponent = (container: MaskContainer, component: CustomMaskComponent) => {
+    if (!container.subMasks.length) {
+      return;
+    }
+
+    const updatedComponent = {
+      ...component,
+      subMasks: cloneSubMaskTreeForCustomComponent(container.subMasks, component.id),
+    };
+    const mergedSubMask = createCustomComponentSubMask(updatedComponent);
+
+    setAdjustments((prev: Adjustments) => ({
+      ...prev,
+      customMaskComponents: (prev.customMaskComponents || []).map((customComponent) =>
+        customComponent.id === component.id
+          ? updatedComponent
+          : {
+              ...customComponent,
+              subMasks: syncComponentInstancesDeep(customComponent.subMasks, component.id, updatedComponent),
+            },
+      ),
+      masks: prev.masks.map((maskContainer) => {
+        if (maskContainer.id === container.id) {
+          return { ...maskContainer, subMasks: [mergedSubMask] };
+        }
+
+        return {
+          ...maskContainer,
+          subMasks: syncComponentInstancesDeep(maskContainer.subMasks, component.id, updatedComponent),
+        };
+      }),
+    }));
+
+    onSelectContainer(container.id);
+    onSelectMask(mergedSubMask.id);
+    setExpandedContainers((prev) => new Set(prev).add(container.id));
+  };
+
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   const handleDragStart = (event: DragStartEvent) => {
@@ -1125,8 +1413,8 @@ export default function MasksPanel() {
         } else if (overData?.type === 'SubMask') {
           const container = adjustments.masks.find((m) => m.id === overData.parentId);
           if (container) {
-            const targetIndex = container.subMasks.findIndex((sm) => sm.id === over.id);
-            handleAddSubMask(overData.parentId!, dragData.maskType!, targetIndex);
+            const targetIndex = container.subMasks.findIndex((sm) => sm.id === over!.id);
+            handleAddSubMask(overData.parentId!, dragData.maskType!, SubMaskMode.Additive, targetIndex);
           }
         } else {
           handleAddMaskContainer(dragData.maskType!);
@@ -1252,8 +1540,12 @@ export default function MasksPanel() {
     const newMaskSubMenu = allTypes.map((m) => ({
       label: getMaskTypeName(m),
       icon: m.icon,
-      onClick: () => handleAddMaskContainer(m.type),
+      onClick: () => handleAddMaskContainer(m.type!),
     }));
+    const customComponentSubmenu = buildCustomComponentSubmenu(null, SubMaskMode.Additive);
+    if (customComponentSubmenu) {
+      newMaskSubMenu.push(customComponentSubmenu);
+    }
     showContextMenu(e.clientX, e.clientY, [
       {
         label: t('editor.masks.actions.pasteMask'),
@@ -1346,7 +1638,7 @@ export default function MasksPanel() {
                       key={maskType.type || maskType.id}
                       maskType={maskType}
                       onClick={(e: any) =>
-                        maskType.id === 'others' ? handleAddOthersMask(e) : handleGridClick(maskType.type)
+                        maskType.id === 'others' ? handleAddOthersMask(e) : handleGridClick(maskType.type!)
                       }
                       onRightClick={(e: React.MouseEvent) => handleGridRightClick(e, maskType.type)}
                       isDraggable={maskType.id !== 'others'}
@@ -1400,6 +1692,9 @@ export default function MasksPanel() {
                       handleDelete={handleDeleteContainer}
                       handleDuplicate={handleDuplicateContainer}
                       handleDuplicateAndInvert={handleDuplicateAndInvertContainer}
+                      handleConvertToNewComponent={handleConvertContainerToNewComponent}
+                      handleConvertToExistingComponent={handleConvertContainerToExistingComponent}
+                      customMaskComponents={customMaskComponents}
                       handlePasteMask={handlePasteMask}
                       copyMaskToClipboard={copyMaskToClipboard}
                       copiedMask={copiedMask}
@@ -1623,6 +1918,9 @@ function ContainerRow({
   handleDelete,
   handleDuplicate,
   handleDuplicateAndInvert,
+  handleConvertToNewComponent,
+  handleConvertToExistingComponent,
+  customMaskComponents,
   handlePasteMask,
   copyMaskToClipboard,
   copiedMask,
@@ -1953,7 +2251,7 @@ function SubMaskRow({
     setNodeRef(node);
     setDroppableRef(node);
   };
-  const MaskIcon = MASK_ICON_MAP[subMask.type] || Circle;
+  const MaskIcon = MASK_ICON_MAP[subMask.type as Mask] || Circle;
   const { showContextMenu } = useContextMenu();
   const [isHovered, setIsHovered] = useState(false);
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2268,7 +2566,7 @@ function SettingsPanel({
     updateSubMask(activeSubMask.id, { parameters: newParams });
   };
 
-  const subMaskConfig = activeSubMask ? SUB_MASK_CONFIG[activeSubMask.type] || {} : {};
+  const subMaskConfig = activeSubMask ? SUB_MASK_CONFIG[activeSubMask.type as Mask] || {} : {};
   const isAiMask = activeSubMask && ['ai-subject', 'ai-foreground', 'ai-sky', 'ai-depth'].includes(activeSubMask.type);
   const isComponentMode = !!activeSubMask;
 

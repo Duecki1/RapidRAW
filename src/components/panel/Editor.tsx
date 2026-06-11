@@ -58,6 +58,19 @@ const checkCropValid = (pixelCrop: Partial<Crop>, imageW: number, imageH: number
   return true;
 };
 
+const cleanSubMasksForOverlayHash = (subMasks: Array<SubMask> = []): Array<SubMask> =>
+  subMasks.map((subMask) => {
+    const cleanParams: Record<string, unknown> = { ...(subMask.parameters || {}) };
+    delete cleanParams.mask_data_base64;
+    delete cleanParams.maskDataBase64;
+
+    if (Array.isArray(cleanParams.subMasks)) {
+      cleanParams.subMasks = cleanSubMasksForOverlayHash(cleanParams.subMasks as Array<SubMask>);
+    }
+
+    return { ...subMask, parameters: cleanParams };
+  });
+
 interface WgpuRenderState {
   useWgpuRenderer: boolean | undefined;
   isReady: boolean;
