@@ -13,10 +13,13 @@ import {
   PasteMode,
   LensAdjustment,
   normalizeLoadedAdjustments,
+  MaskContainer,
 } from '../utils/adjustments';
 import { calculateCenteredCrop } from '../utils/cropUtils';
 import { Invokes } from '../components/ui/AppProperties';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import { isRefreshableAiMaskType, withMaskUpdatedFlag } from '../utils/maskUtils';
+import { SubMask } from '../components/panel/right/Masks';
 
 export const debouncedSetHistory = debounce((newAdj: Adjustments) => {
   useEditorStore.getState().pushHistory(newAdj);
@@ -28,6 +31,19 @@ export const debouncedSave = debounce((path: string, adjustmentsToSave: Adjustme
     toast.error(`Failed to save changes: ${err}`);
   });
 }, 300);
+
+const markPastedAiMasksAsStale = (masks: MaskContainer[] = []): MaskContainer[] =>
+  masks.map((container) => ({
+    ...container,
+    subMasks: (container.subMasks || []).map((subMask: SubMask) =>
+      isRefreshableAiMaskType(subMask.type)
+        ? {
+            ...subMask,
+            parameters: withMaskUpdatedFlag((subMask.parameters || {}) as Record<string, unknown>, false),
+          }
+        : subMask,
+    ),
+  }));
 
 export function useEditorActions() {
   const setEditor = useEditorStore((s) => s.setEditor);
@@ -177,7 +193,7 @@ export function useEditorActions() {
       const { appSettings } = useSettingsStore.getState();
       const { setProcess } = useProcessStore.getState();
 
-      if (!copiedAdjustments || !appSettings) return;
+      if (!copiedAdjustments || !appSettings?.copyPasteSettings) return;
 
       const { mode, includedAdjustments } = appSettings.copyPasteSettings;
       const adjustmentsToApply: Partial<Adjustments> = {};
@@ -187,10 +203,15 @@ export function useEditorActions() {
           const value = copiedAdjustments[key as keyof Adjustments];
           if (mode === PasteMode.Merge) {
             const defaultValue = INITIAL_ADJUSTMENTS[key as keyof Adjustments];
-            if (JSON.stringify(value) !== JSON.stringify(defaultValue))
-              adjustmentsToApply[key as keyof Adjustments] = value;
+            if (JSON.stringify(value) !== JSON.stringify(defaultValue)) {
+              adjustmentsToApply[key as keyof Adjustments] =
+                key === 'masks'
+                  ? (markPastedAiMasksAsStale(structuredClone(value as MaskContainer[])) as never)
+                  : value;
+            }
           } else {
-            adjustmentsToApply[key as keyof Adjustments] = value;
+            adjustmentsToApply[key as keyof Adjustments] =
+              key === 'masks' ? (markPastedAiMasksAsStale(structuredClone(value as MaskContainer[])) as never) : value;
           }
         }
       }

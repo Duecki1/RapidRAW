@@ -38,6 +38,7 @@ import {
   Minus,
   Plus,
   PlusSquare,
+  RefreshCw,
   RotateCcw,
   Trash2,
   SwatchBook,
@@ -78,7 +79,7 @@ import {
 } from '../../../utils/adjustments';
 import { useContextMenu } from '../../../context/ContextMenuContext';
 import { OPTION_SEPARATOR, Orientation } from '../../ui/AppProperties';
-import { createSubMask } from '../../../utils/maskUtils';
+import { createSubMask, isRefreshableAiMaskType } from '../../../utils/maskUtils';
 import { usePresets } from '../../../hooks/usePresets';
 import Text from '../../ui/Text';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../../types/typography';
@@ -653,7 +654,12 @@ function DepthRangePicker({
 export default function MasksPanel() {
   const { t } = useTranslation();
   const { setAdjustments } = useEditorActions();
-  const { handleGenerateAiDepthMask, handleGenerateAiForegroundMask, handleGenerateAiSkyMask } = useAiMasking();
+  const {
+    handleGenerateAiDepthMask,
+    handleGenerateAiForegroundMask,
+    handleGenerateAiSkyMask,
+    handleUpdateStaleAiMasks,
+  } = useAiMasking();
   const setCustomEscapeHandler = useUIStore((s) => s.setCustomEscapeHandler);
   const { appSettings } = useSettingsStore(
     useShallow((state) => ({
@@ -758,6 +764,11 @@ export default function MasksPanel() {
   const customMaskComponents = adjustments.customMaskComponents || [];
   const isAiMask =
     activeSubMaskData && [Mask.AiSubject, Mask.AiForeground, Mask.AiSky, Mask.AiDepth].includes(activeSubMaskData.type);
+  const hasStaleAiMasks = (adjustments.masks || []).some((container: MaskContainer) =>
+    (container.subMasks || []).some(
+      (subMask: SubMask) => isRefreshableAiMaskType(subMask.type) && subMask.parameters?.maskUpdated === false,
+    ),
+  );
 
   const getNextCustomComponentName = () => {
     const normalizedBase = 'Custom Component';
@@ -1578,6 +1589,16 @@ export default function MasksPanel() {
             >
               <ChartArea size={18} />
             </button>
+            {hasStaleAiMasks && (
+              <button
+                className="p-2 rounded-full hover:bg-surface transition-colors text-yellow-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                onClick={handleUpdateStaleAiMasks}
+                disabled={isGeneratingAiMask}
+                data-tooltip="Update AI masks"
+              >
+                {isGeneratingAiMask ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
+              </button>
+            )}
             <button
               className="p-2 rounded-full hover:bg-surface transition-colors"
               onClick={handleResetAllMasks}

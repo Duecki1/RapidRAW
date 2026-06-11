@@ -1,6 +1,4 @@
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 
 use base64::{Engine as _, engine::general_purpose};
@@ -12,12 +10,12 @@ use serde_json::Value;
 use crate::ai_connector;
 use crate::ai_processing::{
     self, AiDepthMaskParameters, AiForegroundMaskParameters, AiSkyMaskParameters,
-    AiSubjectMaskParameters, CachedDepthMap, get_or_init_ai_models, run_birefnet_model,
-    run_depth_anything_model, run_sky_seg_model,
+    AiSubjectMaskParameters, CachedAiMask, CachedDepthMap, get_or_init_ai_models,
+    run_birefnet_model, run_depth_anything_model, run_sky_seg_model,
 };
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
-use crate::cache_utils::GEOMETRY_KEYS;
+use crate::cache_utils::calculate_geometry_hash;
 use crate::image_loader::composite_patches_on_image;
 use crate::image_processing::apply_unwarp_geometry;
 use crate::mask_generation::{AiPatchDefinition, MaskDefinition, generate_mask_bitmap};
@@ -34,6 +32,32 @@ fn encode_to_base64_png(image: &GrayImage) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{}", base64_str))
 }
 
+fn get_ai_mask_cache_key(
+    state: &tauri::State<AppState>,
+    js_adjustments: &serde_json::Value,
+    explicit_path: Option<&str>,
+) -> Result<String, String> {
+    let image_path = if let Some(path) = explicit_path
+        && !path.is_empty()
+    {
+        path.to_string()
+    } else {
+        state
+            .original_image
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|loaded| loaded.path.clone())
+            .ok_or_else(|| "No image loaded for AI mask cache".to_string())?
+    };
+
+    let geometry_hash = calculate_geometry_hash(js_adjustments);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(image_path.as_bytes());
+    hasher.update(&geometry_hash.to_le_bytes());
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 #[tauri::command]
 pub async fn generate_ai_foreground_mask(
     js_adjustments: serde_json::Value,
@@ -44,6 +68,26 @@ pub async fn generate_ai_foreground_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiForegroundMaskParameters, String> {
+    let path_hash = get_ai_mask_cache_key(&state, &js_adjustments, None)?;
+
+    if let Some(cached_mask) = state
+        .ai_state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|ai_state| ai_state.foreground_mask.as_ref())
+        .filter(|cached| cached.path_hash == path_hash)
+        .map(|cached| cached.mask_data_base64.clone())
+    {
+        return Ok(AiForegroundMaskParameters {
+            mask_data_base64: Some(cached_mask),
+            rotation: Some(rotation),
+            flip_horizontal: Some(flip_horizontal),
+            flip_vertical: Some(flip_vertical),
+            orientation_steps: Some(orientation_steps),
+        });
+    }
+
     let models = get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
         .await
         .map_err(|e| e.to_string())?;
@@ -54,6 +98,15 @@ pub async fn generate_ai_foreground_mask(
         run_birefnet_model(warped_image.as_ref(), &models.birefnet).map_err(|e| e.to_string())?;
     let feathered_mask = image::imageops::blur(&full_mask_image, 2.0);
     let base64_data = encode_to_base64_png(&feathered_mask)?;
+    {
+        let mut ai_state_lock = state.ai_state.lock().unwrap();
+        if let Some(ai_state) = ai_state_lock.as_mut() {
+            ai_state.foreground_mask = Some(CachedAiMask {
+                path_hash,
+                mask_data_base64: base64_data.clone(),
+            });
+        }
+    }
 
     Ok(AiForegroundMaskParameters {
         mask_data_base64: Some(base64_data),
@@ -74,6 +127,26 @@ pub async fn generate_ai_sky_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiSkyMaskParameters, String> {
+    let path_hash = get_ai_mask_cache_key(&state, &js_adjustments, None)?;
+
+    if let Some(cached_mask) = state
+        .ai_state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|ai_state| ai_state.sky_mask.as_ref())
+        .filter(|cached| cached.path_hash == path_hash)
+        .map(|cached| cached.mask_data_base64.clone())
+    {
+        return Ok(AiSkyMaskParameters {
+            mask_data_base64: Some(cached_mask),
+            rotation: Some(rotation),
+            flip_horizontal: Some(flip_horizontal),
+            flip_vertical: Some(flip_vertical),
+            orientation_steps: Some(orientation_steps),
+        });
+    }
+
     let models = get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
         .await
         .map_err(|e| e.to_string())?;
@@ -83,6 +156,15 @@ pub async fn generate_ai_sky_mask(
     let full_mask_image =
         run_sky_seg_model(warped_image.as_ref(), &models.sky_seg).map_err(|e| e.to_string())?;
     let base64_data = encode_to_base64_png(&full_mask_image)?;
+    {
+        let mut ai_state_lock = state.ai_state.lock().unwrap();
+        if let Some(ai_state) = ai_state_lock.as_mut() {
+            ai_state.sky_mask = Some(CachedAiMask {
+                path_hash,
+                mask_data_base64: base64_data.clone(),
+            });
+        }
+    }
 
     Ok(AiSkyMaskParameters {
         mask_data_base64: Some(base64_data),
@@ -110,66 +192,43 @@ pub async fn generate_ai_depth_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiDepthMaskParameters, String> {
-    let models = get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
-        .await
-        .map_err(|e| e.to_string())?;
+    let path_hash = get_ai_mask_cache_key(&state, &js_adjustments, Some(&path))?;
 
-    let path_hash = {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(path.as_bytes());
-        let mut geo_hasher = DefaultHasher::new();
-        for key in GEOMETRY_KEYS {
-            if let Some(val) = js_adjustments.get(key) {
-                key.hash(&mut geo_hasher);
-                val.to_string().hash(&mut geo_hasher);
-            }
-        }
-        hasher.update(&geo_hasher.finish().to_le_bytes());
-        hasher.finalize().to_hex().to_string()
-    };
+    let cached_depth_mask = state
+        .ai_state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|ai_state| ai_state.depth_map.as_ref())
+        .filter(|cached| cached.path_hash == path_hash)
+        .map(|cached| cached.mask_data_base64.clone());
 
-    let cached_depth = {
+    let base64_data = if let Some(mask_data_base64) = cached_depth_mask {
+        mask_data_base64
+    } else {
+        let models = get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
+            .await
+            .map_err(|e| e.to_string())?;
+        let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+        let depth_img = run_depth_anything_model(warped_image.as_ref(), &models.depth_anything)
+            .map_err(|e| e.to_string())?;
+        let raw_depth_fullres = image::imageops::resize(
+            &depth_img,
+            warped_image.width(),
+            warped_image.height(),
+            image::imageops::FilterType::Triangle,
+        );
+        let mask_data_base64 = encode_to_base64_png(&raw_depth_fullres)?;
+        let new_cache = CachedDepthMap {
+            path_hash,
+            mask_data_base64: mask_data_base64.clone(),
+        };
         let mut ai_state_lock = state.ai_state.lock().unwrap();
-        let ai_state = ai_state_lock.as_mut().unwrap();
-
-        if let Some(cached) = &ai_state.depth_map {
-            if cached.path_hash == path_hash {
-                cached.clone()
-            } else {
-                let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
-                let depth_img =
-                    run_depth_anything_model(warped_image.as_ref(), &models.depth_anything)
-                        .map_err(|e| e.to_string())?;
-                let new_cache = CachedDepthMap {
-                    path_hash: path_hash.clone(),
-                    depth_image: depth_img,
-                    original_size: (warped_image.width(), warped_image.height()),
-                };
-                ai_state.depth_map = Some(new_cache.clone());
-                new_cache
-            }
-        } else {
-            let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
-            let depth_img = run_depth_anything_model(warped_image.as_ref(), &models.depth_anything)
-                .map_err(|e| e.to_string())?;
-            let new_cache = CachedDepthMap {
-                path_hash: path_hash.clone(),
-                depth_image: depth_img,
-                original_size: (warped_image.width(), warped_image.height()),
-            };
-            ai_state.depth_map = Some(new_cache.clone());
-            new_cache
+        if let Some(ai_state) = ai_state_lock.as_mut() {
+            ai_state.depth_map = Some(new_cache);
         }
+        mask_data_base64
     };
-
-    let raw_depth_fullres = image::imageops::resize(
-        &cached_depth.depth_image,
-        cached_depth.original_size.0,
-        cached_depth.original_size.1,
-        image::imageops::FilterType::Triangle,
-    );
-
-    let base64_data = encode_to_base64_png(&raw_depth_fullres)?;
 
     Ok(AiDepthMaskParameters {
         min_depth,

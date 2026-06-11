@@ -1,6 +1,7 @@
 import { Crop } from 'react-image-crop';
 import { v4 as uuidv4 } from 'uuid';
 import { Mask, SubMask, SubMaskMode } from '../components/panel/right/Masks';
+import { isAiMaskType, withMaskUpdatedFlag } from './maskUtils';
 
 export enum ActiveChannel {
   Blue = 'blue',

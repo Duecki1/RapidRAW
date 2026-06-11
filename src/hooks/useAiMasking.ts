@@ -4,9 +4,10 @@ import { toast } from 'react-toastify';
 import { useEditorStore } from '../store/useEditorStore';
 import { useEditorActions } from './useEditorActions';
 import { Adjustments, AiPatch, MaskContainer, Coord } from '../utils/adjustments';
-import { SubMask } from '../components/panel/right/Masks';
+import { Mask, SubMask } from '../components/panel/right/Masks';
 import { Invokes } from '../components/ui/AppProperties';
 import { useAuth } from '@clerk/react';
+import { REFRESHABLE_AI_MASK_TYPES, isRefreshableAiMaskType, withMaskUpdatedFlag } from '../utils/maskUtils';
 
 const getTransformAdjustments = (adj: Adjustments) => ({
   transformDistortion: adj.transformDistortion,
@@ -27,6 +28,12 @@ const getTransformAdjustments = (adj: Adjustments) => ({
   lensTcaEnabled: adj.lensTcaEnabled,
   lensVignetteEnabled: adj.lensVignetteEnabled,
 });
+
+const findSubMaskById = (adjustments: Adjustments, subMaskId: string) =>
+  [
+    ...(adjustments.masks || []).flatMap((container: MaskContainer) => container.subMasks || []),
+    ...(adjustments.aiPatches || []).flatMap((patch: AiPatch) => patch.subMasks || []),
+  ].find((subMask: SubMask) => subMask.id === subMaskId);
 
 export function useAiMasking() {
   const { setAdjustments } = useEditorActions();
@@ -126,7 +133,7 @@ export function useAiMasking() {
 
       try {
         const transformAdjustments = getTransformAdjustments(adjustments);
-        const newMaskParams: any = await invoke(Invokes.GenerateAiSubjectMask, {
+        const newMaskParams = await invoke<Record<string, unknown>>(Invokes.GenerateAiSubjectMask, {
           jsAdjustments: transformAdjustments,
           endPoint: [endPoint.x, endPoint.y],
           flipHorizontal: adjustments.flipHorizontal,
@@ -241,7 +248,7 @@ export function useAiMasking() {
 
     try {
       const transformAdjustments = getTransformAdjustments(adjustments);
-      const newParameters = await invoke(Invokes.GenerateAiSubjectMask, {
+      const newParameters = await invoke<Record<string, unknown>>(Invokes.GenerateAiSubjectMask, {
         jsAdjustments: transformAdjustments,
         endPoint: [endPoint.x, endPoint.y],
         flipHorizontal: adjustments.flipHorizontal,
@@ -252,10 +259,8 @@ export function useAiMasking() {
         startPoint: [startPoint.x, startPoint.y],
       });
 
-      const subMask = adjustments.aiPatches
-        ?.flatMap((p: AiPatch) => p.subMasks)
-        .find((sm: SubMask) => sm.id === subMaskId);
-      const mergedParameters = { ...(subMask?.parameters || {}), ...newParameters };
+      const subMask = findSubMaskById(adjustments, subMaskId);
+      const mergedParameters = withMaskUpdatedFlag({ ...(subMask?.parameters || {}), ...newParameters });
       patchesSentToBackend.delete(subMaskId);
       updateSubMask(subMaskId, { parameters: mergedParameters });
     } catch (error) {
@@ -272,7 +277,7 @@ export function useAiMasking() {
 
     try {
       const transformAdjustments = getTransformAdjustments(adjustments);
-      const newParameters = await invoke('generate_ai_depth_mask', {
+      const newParameters = await invoke<Record<string, unknown>>('generate_ai_depth_mask', {
         jsAdjustments: transformAdjustments,
         path: selectedImage.path,
         minDepth: parameters.minDepth ?? 20,
@@ -286,10 +291,8 @@ export function useAiMasking() {
         rotation: adjustments.rotation,
       });
 
-      const subMask = adjustments.aiPatches
-        ?.flatMap((p: AiPatch) => p.subMasks)
-        .find((sm: SubMask) => sm.id === subMaskId);
-      const mergedParameters = { ...(subMask?.parameters || {}), ...newParameters };
+      const subMask = findSubMaskById(adjustments, subMaskId);
+      const mergedParameters = withMaskUpdatedFlag({ ...(subMask?.parameters || {}), ...newParameters });
       patchesSentToBackend.delete(subMaskId);
       updateSubMask(subMaskId, { parameters: mergedParameters });
     } catch (error) {
@@ -306,7 +309,7 @@ export function useAiMasking() {
 
     try {
       const transformAdjustments = getTransformAdjustments(adjustments);
-      const newParameters = await invoke(Invokes.GenerateAiForegroundMask, {
+      const newParameters = await invoke<Record<string, unknown>>(Invokes.GenerateAiForegroundMask, {
         jsAdjustments: transformAdjustments,
         flipHorizontal: adjustments.flipHorizontal,
         flipVertical: adjustments.flipVertical,
@@ -314,10 +317,8 @@ export function useAiMasking() {
         rotation: adjustments.rotation,
       });
 
-      const subMask = adjustments.aiPatches
-        ?.flatMap((p: AiPatch) => p.subMasks)
-        .find((sm: SubMask) => sm.id === subMaskId);
-      const mergedParameters = { ...(subMask?.parameters || {}), ...newParameters };
+      const subMask = findSubMaskById(adjustments, subMaskId);
+      const mergedParameters = withMaskUpdatedFlag({ ...(subMask?.parameters || {}), ...newParameters });
       patchesSentToBackend.delete(subMaskId);
       updateSubMask(subMaskId, { parameters: mergedParameters });
     } catch (error) {
@@ -334,7 +335,7 @@ export function useAiMasking() {
 
     try {
       const transformAdjustments = getTransformAdjustments(adjustments);
-      const newParameters = await invoke(Invokes.GenerateAiSkyMask, {
+      const newParameters = await invoke<Record<string, unknown>>(Invokes.GenerateAiSkyMask, {
         jsAdjustments: transformAdjustments,
         flipHorizontal: adjustments.flipHorizontal,
         flipVertical: adjustments.flipVertical,
@@ -342,14 +343,118 @@ export function useAiMasking() {
         rotation: adjustments.rotation,
       });
 
-      const subMask = adjustments.aiPatches
-        ?.flatMap((p: AiPatch) => p.subMasks)
-        .find((sm: SubMask) => sm.id === subMaskId);
-      const mergedParameters = { ...(subMask?.parameters || {}), ...newParameters };
+      const subMask = findSubMaskById(adjustments, subMaskId);
+      const mergedParameters = withMaskUpdatedFlag({ ...(subMask?.parameters || {}), ...newParameters });
       patchesSentToBackend.delete(subMaskId);
       updateSubMask(subMaskId, { parameters: mergedParameters });
     } catch (error) {
       toast.error(`AI Mask Failed: ${error}`);
+    } finally {
+      setEditor({ isGeneratingAiMask: false });
+    }
+  };
+
+  const handleUpdateStaleAiMasks = async () => {
+    const { selectedImage, adjustments, patchesSentToBackend, isGeneratingAiMask } = useEditorStore.getState();
+    if (!selectedImage?.path || isGeneratingAiMask) return;
+
+    const staleSubMasks = (adjustments.masks || [])
+      .flatMap((container: MaskContainer) => container.subMasks || [])
+      .filter((subMask: SubMask) => isRefreshableAiMaskType(subMask.type) && subMask.parameters?.maskUpdated === false);
+
+    if (staleSubMasks.length === 0) return;
+
+    setEditor({ isGeneratingAiMask: true });
+
+    try {
+      const transformAdjustments = getTransformAdjustments(adjustments);
+      const generatedByType: Partial<Record<Mask, Record<string, unknown>>> = {};
+
+      for (const type of REFRESHABLE_AI_MASK_TYPES) {
+        const sourceSubMask = staleSubMasks.find((subMask) => subMask.type === type);
+        if (!sourceSubMask) continue;
+
+        if (type === Mask.AiForeground) {
+          generatedByType[type] = await invoke<Record<string, unknown>>(Invokes.GenerateAiForegroundMask, {
+            jsAdjustments: transformAdjustments,
+            flipHorizontal: adjustments.flipHorizontal,
+            flipVertical: adjustments.flipVertical,
+            orientationSteps: adjustments.orientationSteps,
+            rotation: adjustments.rotation,
+          });
+        } else if (type === Mask.AiSky) {
+          generatedByType[type] = await invoke<Record<string, unknown>>(Invokes.GenerateAiSkyMask, {
+            jsAdjustments: transformAdjustments,
+            flipHorizontal: adjustments.flipHorizontal,
+            flipVertical: adjustments.flipVertical,
+            orientationSteps: adjustments.orientationSteps,
+            rotation: adjustments.rotation,
+          });
+        } else if (type === Mask.AiDepth) {
+          const params = sourceSubMask.parameters || {};
+          generatedByType[type] = await invoke<Record<string, unknown>>('generate_ai_depth_mask', {
+            jsAdjustments: transformAdjustments,
+            path: selectedImage.path,
+            minDepth: params.minDepth ?? 20,
+            maxDepth: params.maxDepth ?? 100,
+            minFade: params.minFade ?? 15,
+            maxFade: params.maxFade ?? 15,
+            feather: params.feather ?? 10,
+            flipHorizontal: adjustments.flipHorizontal,
+            flipVertical: adjustments.flipVertical,
+            orientationSteps: adjustments.orientationSteps,
+            rotation: adjustments.rotation,
+          });
+        }
+      }
+
+      staleSubMasks.forEach((subMask) => patchesSentToBackend.delete(subMask.id));
+
+      setAdjustments((prev: Adjustments) => ({
+        ...prev,
+        masks: (prev.masks || []).map((container: MaskContainer) => ({
+          ...container,
+          subMasks: (container.subMasks || []).map((subMask: SubMask) => {
+            if (!isRefreshableAiMaskType(subMask.type) || subMask.parameters?.maskUpdated !== false) {
+              return subMask;
+            }
+
+            const generatedParams = generatedByType[subMask.type];
+            if (!generatedParams) return subMask;
+
+            const maskDataBase64 =
+              typeof generatedParams.maskDataBase64 === 'string'
+                ? generatedParams.maskDataBase64
+                : typeof generatedParams.mask_data_base64 === 'string'
+                  ? generatedParams.mask_data_base64
+                  : null;
+            const sharedGeneratedParams = {
+              ...(maskDataBase64 ? { maskDataBase64 } : {}),
+              rotation: generatedParams.rotation,
+              flipHorizontal: generatedParams.flipHorizontal,
+              flipVertical: generatedParams.flipVertical,
+              orientationSteps: generatedParams.orientationSteps,
+            };
+
+            return {
+              ...subMask,
+              parameters:
+                subMask.type === Mask.AiDepth
+                  ? withMaskUpdatedFlag({
+                      ...(subMask.parameters || {}),
+                      ...sharedGeneratedParams,
+                    })
+                  : withMaskUpdatedFlag({
+                      ...(subMask.parameters || {}),
+                      ...generatedParams,
+                      ...sharedGeneratedParams,
+                    }),
+            };
+          }),
+        })),
+      }));
+    } catch (error) {
+      toast.error(`AI Mask Update Failed: ${error}`);
     } finally {
       setEditor({ isGeneratingAiMask: false });
     }
@@ -385,5 +490,6 @@ export function useAiMasking() {
     handleGenerateAiDepthMask,
     handleGenerateAiForegroundMask,
     handleGenerateAiSkyMask,
+    handleUpdateStaleAiMasks,
   };
 }
