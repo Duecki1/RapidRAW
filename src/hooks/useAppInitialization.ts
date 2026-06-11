@@ -12,10 +12,12 @@ import {
   Invokes,
   LibraryViewMode,
   RawStatus,
+  EditedStatus,
   Theme,
   ThumbnailSize,
   ThumbnailAspectRatio,
 } from '../components/ui/AppProperties';
+import { useTranslation } from 'react-i18next';
 
 interface UseAppInitializationProps {
   preloadedDataRef: React.RefObject<any>;
@@ -27,6 +29,23 @@ interface UseAppInitializationProps {
   setLibraryViewMode: (mode: LibraryViewMode) => void;
 }
 
+const getDefaultLanguage = (i18nInstance: any): string => {
+  const browserLang = navigator.language || (navigator as any).userLanguage || 'en';
+  const shortLang = browserLang.split('-')[0].toLowerCase();
+  const supportedLanguages = Object.keys(i18nInstance.options.resources || {});
+  const fallbackLang =
+    typeof i18nInstance.options.fallbackLng === 'string'
+      ? i18nInstance.options.fallbackLng
+      : i18nInstance.options.fallbackLng?.[0] || 'en';
+
+  // Check full locale first (e.g., 'zh-CN'), then short code (e.g., 'zh')
+  return supportedLanguages.includes(browserLang)
+    ? browserLang
+    : supportedLanguages.includes(shortLang)
+    ? shortLang
+    : fallbackLang;
+};
+
 export const useAppInitialization = ({
   preloadedDataRef,
   thumbnailSize,
@@ -37,6 +56,7 @@ export const useAppInitialization = ({
   setLibraryViewMode,
 }: UseAppInitializationProps) => {
   const isInitialMount = useRef(true);
+  const { i18n } = useTranslation();
 
   const {
     appSettings,
@@ -67,10 +87,24 @@ export const useAppInitialization = ({
     })),
   );
 
-  const { sortCriteria, filterCriteria, setSortCriteria, setFilterCriteria, setLibrary } = useLibraryStore(
+  const {
+    sortCriteria,
+    filterCriteria,
+    currentFolderPath,
+    expandedFolders,
+    activeAlbumId,
+    expandedAlbumGroups,
+    setSortCriteria,
+    setFilterCriteria,
+    setLibrary,
+  } = useLibraryStore(
     useShallow((state) => ({
       sortCriteria: state.sortCriteria,
       filterCriteria: state.filterCriteria,
+      currentFolderPath: state.currentFolderPath,
+      expandedFolders: state.expandedFolders,
+      activeAlbumId: state.activeAlbumId,
+      expandedAlbumGroups: state.expandedAlbumGroups,
       setSortCriteria: state.setSortCriteria,
       setFilterCriteria: state.setFilterCriteria,
       setLibrary: state.setLibrary,
@@ -107,7 +141,14 @@ export const useAppInitialization = ({
         ) {
           settings.copyPasteSettings = { mode: 'merge', includedAdjustments: COPYABLE_ADJUSTMENT_KEYS };
         }
+
+        if (!settings.language) {
+          settings.language = getDefaultLanguage(i18n);
+          handleSettingsChange(settings);
+        }
+
         setAppSettings(settings);
+        i18n.changeLanguage(settings.language);
 
         if (settings?.sortCriteria) setSortCriteria(settings.sortCriteria);
 
@@ -116,6 +157,7 @@ export const useAppInitialization = ({
             ...prev,
             ...settings.filterCriteria,
             rawStatus: settings.filterCriteria.rawStatus || RawStatus.All,
+            editedStatus: settings.filterCriteria.editedStatus || EditedStatus.All,
             colors: settings.filterCriteria.colors || [],
           }));
         }
@@ -146,24 +188,37 @@ export const useAppInitialization = ({
           }
         }
 
-        if (!isAndroid && settings.lastRootPath) {
-          const root = settings.lastRootPath;
-          const currentPath = settings.lastFolderState?.currentFolderPath || root;
+        const rootFolders = settings.rootFolders?.length
+          ? settings.rootFolders
+          : settings.lastRootPath
+            ? [settings.lastRootPath]
+            : [];
+
+        if (!isAndroid && rootFolders.length > 0) {
+          const currentPath = settings.lastFolderState?.currentFolderPath || rootFolders[0];
+          const isAlbum = currentPath.startsWith('Album: ');
           const command =
             settings.libraryViewMode === LibraryViewMode.Recursive
               ? Invokes.ListImagesRecursive
               : Invokes.ListImagesInDir;
 
           preloadedDataRef.current = {
-            rootPath: root,
+            rootPaths: rootFolders,
             currentPath: currentPath,
-            tree: invoke(Invokes.GetFolderTree, {
-              path: root,
-              expandedFolders: settings.lastFolderState?.expandedFolders ?? [root],
+            trees: invoke(Invokes.GetPinnedFolderTrees, {
+              paths: rootFolders,
+              expandedFolders: settings.lastFolderState?.expandedFolders ?? rootFolders,
               showImageCounts: settings.enableFolderImageCounts ?? false,
             }),
-            images: invoke(command, { path: currentPath }),
+            images: isAlbum ? undefined : invoke(command, { path: currentPath }),
           };
+        }
+
+        if (settings?.lastFolderState) {
+          setLibrary({
+            expandedFolders: new Set(settings.lastFolderState.expandedFolders || []),
+            expandedAlbumGroups: new Set(settings.lastFolderState.expandedAlbumGroups || []),
+          });
         }
 
         invoke('frontend_ready').catch((e) => console.error('Failed to notify backend of readiness:', e));
@@ -197,7 +252,6 @@ export const useAppInitialization = ({
     setThumbnailAspectRatio,
   ]);
 
-  // 4. Settings Synchronization Effects
   useEffect(() => {
     if (isInitialMount.current || !appSettings) return;
     if (JSON.stringify(appSettings.uiVisibility) !== JSON.stringify(uiVisibility)) {
@@ -239,6 +293,46 @@ export const useAppInitialization = ({
       handleSettingsChange({ ...appSettings, filterCriteria });
     }
   }, [filterCriteria, appSettings, handleSettingsChange]);
+
+  useEffect(() => {
+    if (isInitialMount.current || !appSettings) return;
+    if (appSettings.language && appSettings.language !== i18n.language) {
+      i18n.changeLanguage(appSettings.language);
+    }
+  }, [appSettings?.language, i18n.language]);
+
+  useEffect(() => {
+    if (isInitialMount.current || !appSettings) return;
+    if (!currentFolderPath && !activeAlbumId) return;
+
+    const currentExpanded = Array.from(expandedFolders);
+    const currentExpandedAlbums = Array.from(expandedAlbumGroups);
+
+    const prevFolderState = appSettings.lastFolderState || {
+      currentFolderPath: null,
+      expandedFolders: [],
+      activeAlbumId: null,
+      expandedAlbumGroups: [],
+    };
+
+    const pathChanged = prevFolderState.currentFolderPath !== currentFolderPath;
+    const expandedChanged = JSON.stringify(prevFolderState.expandedFolders || []) !== JSON.stringify(currentExpanded);
+    const albumChanged = prevFolderState.activeAlbumId !== activeAlbumId;
+    const albumExpandedChanged =
+      JSON.stringify(prevFolderState.expandedAlbumGroups || []) !== JSON.stringify(currentExpandedAlbums);
+
+    if (pathChanged || expandedChanged || albumChanged || albumExpandedChanged) {
+      handleSettingsChange({
+        ...appSettings,
+        lastFolderState: {
+          currentFolderPath,
+          expandedFolders: currentExpanded,
+          activeAlbumId,
+          expandedAlbumGroups: currentExpandedAlbums,
+        },
+      });
+    }
+  }, [currentFolderPath, expandedFolders, activeAlbumId, expandedAlbumGroups, appSettings, handleSettingsChange]);
 
   useEffect(() => {
     const root = document.documentElement;

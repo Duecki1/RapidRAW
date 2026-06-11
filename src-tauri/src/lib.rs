@@ -360,68 +360,76 @@ fn process_preview_job(
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let use_wgpu_renderer = false;
 
+    let has_roi = roi.is_some();
     let (interactive_divisor, interactive_quality) = match live_quality {
         "full" => (1.0_f32, 85_u8),
-        "performance" => (1.8_f32, 65_u8),
-        _ => (1.2_f32, 75_u8),
+        "performance" => (if has_roi { 1.8_f32 } else { 1.5_f32 }, 65_u8),
+        _ => (if has_roi { 1.4_f32 } else { 1.0_f32 }, 75_u8),
     };
 
     let mut cached_preview_lock = state.cached_preview.lock().unwrap();
 
-    let cache_valid = cached_preview_lock.as_ref().is_some_and(|c| {
-        c.transform_hash == new_transform_hash
-            && c.preview_dim == preview_dim
-            && c.interactive_divisor == interactive_divisor
-    });
+    let base_valid = cached_preview_lock
+        .as_ref()
+        .is_some_and(|c| c.transform_hash == new_transform_hash && c.preview_dim == preview_dim);
+    let small_valid = base_valid
+        && cached_preview_lock
+            .as_ref()
+            .is_some_and(|c| c.interactive_divisor == interactive_divisor);
 
-    let (final_preview_base, small_preview_base, scale_for_gpu, unscaled_crop_offset) =
-        if cache_valid {
-            let cached = cached_preview_lock.as_ref().unwrap();
-            (
-                Arc::clone(&cached.image),
-                Arc::clone(&cached.small_image),
-                cached.scale,
-                cached.unscaled_crop_offset,
-            )
-        } else {
-            *state.gpu_image_cache.lock().unwrap() = None;
+    let (final_preview_base, scale_for_gpu, unscaled_crop_offset) = if base_valid {
+        let cached = cached_preview_lock.as_ref().unwrap();
+        (
+            Arc::clone(&cached.image),
+            cached.scale,
+            cached.unscaled_crop_offset,
+        )
+    } else {
+        *state.gpu_image_cache.lock().unwrap() = None;
 
-            let (base, scale, offset) = generate_transformed_preview(
-                &state,
-                &loaded_image,
-                &adjustments_clone,
-                preview_dim,
-            )?;
+        let (base, scale, offset) =
+            generate_transformed_preview(&state, &loaded_image, &adjustments_clone, preview_dim)?;
+        (Arc::new(base), scale, offset)
+    };
 
-            let small_base = if interactive_divisor > 1.0 {
-                let target_size = (preview_dim as f32 / interactive_divisor) as u32;
-                let (w, h) = base.dimensions();
-                let (small_w, small_h) = if w > h {
-                    let ratio = h as f32 / w as f32;
-                    (target_size, (target_size as f32 * ratio) as u32)
-                } else {
-                    let ratio = w as f32 / h as f32;
-                    ((target_size as f32 * ratio) as u32, target_size)
-                };
-                image_processing::downscale_f32_image(&base, small_w, small_h)
+    let small_preview_base = if small_valid {
+        Arc::clone(&cached_preview_lock.as_ref().unwrap().small_image)
+    } else {
+        let small = if interactive_divisor > 1.0 {
+            let target_size = (preview_dim as f32 / interactive_divisor) as u32;
+            let (w, h) = final_preview_base.dimensions();
+            let (small_w, small_h) = if w > h {
+                let ratio = h as f32 / w as f32;
+                (target_size, (target_size as f32 * ratio) as u32)
             } else {
-                base.clone()
+                let ratio = w as f32 / h as f32;
+                ((target_size as f32 * ratio) as u32, target_size)
             };
-
-            let base_arc = Arc::new(base);
-            let small_base_arc = Arc::new(small_base);
-
-            *cached_preview_lock = Some(CachedPreview {
-                image: Arc::clone(&base_arc),
-                small_image: Arc::clone(&small_base_arc),
-                transform_hash: new_transform_hash,
-                scale,
-                unscaled_crop_offset: offset,
-                preview_dim,
-                interactive_divisor,
-            });
-            (base_arc, small_base_arc, scale, offset)
+            Arc::new(image_processing::downscale_f32_image(
+                &final_preview_base,
+                small_w,
+                small_h,
+            ))
+        } else {
+            Arc::clone(&final_preview_base)
         };
+
+        if is_interactive && base_valid {
+            *state.gpu_image_cache.lock().unwrap() = None;
+        }
+
+        small
+    };
+
+    *cached_preview_lock = Some(CachedPreview {
+        image: Arc::clone(&final_preview_base),
+        small_image: Arc::clone(&small_preview_base),
+        transform_hash: new_transform_hash,
+        scale: scale_for_gpu,
+        unscaled_crop_offset,
+        preview_dim,
+        interactive_divisor,
+    });
 
     drop(cached_preview_lock);
 
@@ -430,11 +438,9 @@ fn process_preview_job(
         let small_w = small_preview_base.width() as f32;
         let scale_factor = if orig_w > 0.0 { small_w / orig_w } else { 1.0 };
         let new_scale = scale_for_gpu * scale_factor;
-        let img = Arc::try_unwrap(small_preview_base).unwrap_or_else(|arc| (*arc).clone());
-        (img, new_scale, interactive_quality)
+        (small_preview_base, new_scale, interactive_quality)
     } else {
-        let img = Arc::try_unwrap(final_preview_base).unwrap_or_else(|arc| (*arc).clone());
-        (img, scale_for_gpu, 94)
+        (final_preview_base, scale_for_gpu, 94)
     };
 
     let (preview_width, preview_height) = processing_image.dimensions();
@@ -523,19 +529,14 @@ fn process_preview_job(
 
     if let Ok(final_processed_image) = final_processed_image_result {
         if use_wgpu_renderer {
-            let app_clone = app_handle.clone();
-            let device = context.device.clone();
-            let image_path = loaded_image.path.clone();
-            std::thread::spawn(move || {
-                let _ = device.poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: Some(std::time::Duration::from_millis(500)),
-                });
-                let _ = app_clone.emit(
-                    "wgpu-frame-ready",
-                    serde_json::json!({ "path": image_path }),
-                );
+            let _ = context.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_millis(500)),
             });
+            let _ = app_handle.emit(
+                "wgpu-frame-ready",
+                serde_json::json!({ "path": loaded_image.path }),
+            );
             return Ok(b"WGPU_RENDER".to_vec());
         }
 
@@ -1225,8 +1226,6 @@ async fn generate_all_community_previews(
     const PROCESSING_DIM: u32 = TILE_DIM * 2;
 
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let highlight_compression = settings.raw_highlight_compression.unwrap_or(2.5);
-    let linear_mode = settings.linear_raw_mode;
 
     let mut base_thumbnails: Vec<(DynamicImage, bool, f32)> = Vec::new();
     for image_path in image_paths.iter() {
@@ -1237,8 +1236,7 @@ async fn generate_all_community_previews(
             &image_bytes,
             &source_path_str,
             true,
-            highlight_compression,
-            linear_mode.clone(),
+            &settings,
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -1410,8 +1408,6 @@ async fn merge_hdr(
 
     let hdr_result_handle = state.hdr_result.clone();
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let highlight_compression = settings.raw_highlight_compression.unwrap_or(2.5);
-    let linear_mode = settings.linear_raw_mode;
 
     let loaded_items: Vec<(String, DynamicImage, Duration, f32)> = paths
         .iter()
@@ -1429,15 +1425,9 @@ async fn merge_hdr(
 
             let file_bytes =
                 fs::read(path).map_err(|e| format!("Failed to read image {}: {}", path, e))?;
-            let mut dynamic_image = load_base_image_from_bytes(
-                &file_bytes,
-                path,
-                false,
-                highlight_compression,
-                linear_mode.clone(),
-                None,
-            )
-            .map_err(|e| format!("Failed to load image {}: {}", path, e))?;
+            let mut dynamic_image =
+                load_base_image_from_bytes(&file_bytes, path, false, &settings, None)
+                    .map_err(|e| format!("Failed to load image {}: {}", path, e))?;
 
             if !crate::formats::is_raw_file(path) {
                 dynamic_image = apply_srgb_to_linear(dynamic_image);
@@ -1603,8 +1593,6 @@ fn generate_preview_for_path(
     let source_path_str = source_path.to_string_lossy().to_string();
     let is_raw = is_raw_file(&source_path_str);
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let highlight_compression = settings.raw_highlight_compression.unwrap_or(2.5);
-    let linear_mode = settings.linear_raw_mode.clone();
 
     let base_image = match read_file_mapped(&source_path) {
         Ok(mmap) => load_and_composite(
@@ -1612,8 +1600,7 @@ fn generate_preview_for_path(
             &source_path_str,
             &js_adjustments,
             false,
-            highlight_compression,
-            linear_mode.clone(),
+            &settings,
             None,
         )
         .map_err(|e| e.to_string())?,
@@ -1629,8 +1616,7 @@ fn generate_preview_for_path(
                 &source_path_str,
                 &js_adjustments,
                 false,
-                highlight_compression,
-                linear_mode.clone(),
+                &settings,
                 None,
             )
             .map_err(|e| e.to_string())?
@@ -1986,7 +1972,7 @@ pub fn run() {
 
             let lens_db = lens_correction::load_lensfun_db(&app_handle);
             let state = app.state::<AppState>();
-            *state.lens_db.lock().unwrap() = Some(lens_db);
+            *state.lens_db.lock().unwrap() = Some(Arc::new(lens_db));
 
             unsafe {
                 if let Some(backend) = &settings.processing_backend
@@ -2068,6 +2054,9 @@ pub fn run() {
             }
 
             let window = window_builder.build().expect("Failed to build window");
+
+            #[cfg(target_os = "android")]
+            android_integration::initialize_android(&window);
 
             #[cfg(not(target_os = "android"))]
             {
@@ -2251,6 +2240,8 @@ pub fn run() {
             cancel_thumbnail_generation,
             update_wgpu_transform,
             android_integration::resolve_android_content_uri_name,
+            cache_utils::clear_session_caches,
+            cache_utils::clear_image_caches,
             app_settings::load_settings,
             app_settings::save_settings,
             ai_commands::generate_ai_subject_mask,
@@ -2268,11 +2259,9 @@ pub fn run() {
             image_loader::is_image_cached,
             panorama_stitching::stitch_panorama,
             panorama_stitching::save_panorama,
-            export_processing::export_image,
-            export_processing::batch_export_images,
+            export_processing::export_images,
             export_processing::cancel_export,
-            export_processing::estimate_export_size,
-            export_processing::estimate_batch_export_size,
+            export_processing::estimate_export_sizes,
             image_processing::calculate_auto_adjustments,
             mask_generation::generate_mask_overlay,
             file_management::update_exif_fields,
@@ -2312,6 +2301,10 @@ pub fn run() {
             file_management::set_rating_for_paths,
             file_management::import_files,
             file_management::create_virtual_copy,
+            file_management::get_albums,
+            file_management::save_albums,
+            file_management::add_to_album,
+            file_management::get_album_images,
             tagging::start_background_indexing,
             tagging::clear_ai_tags,
             tagging::clear_all_tags,
